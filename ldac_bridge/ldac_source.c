@@ -4,6 +4,7 @@
 // PCM comes from pcm_capture (WASAPI), is encoded with libldac and sent as RTP media packets.
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,14 @@ static bool      shutting_down;
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static uint8_t  sdp_a2dp_source_service_buffer[150];
 static uint8_t  sdp_avrcp_target_service_buffer[200];
+static uint8_t  sdp_avrcp_controller_service_buffer[200];
+
+// Absolute volume: Windows endpoint volume <-> headset volume (AVRCP 0..127)
+#define VOLUME_POLL_MS          100
+#define AVRCP_VOLUME_MAX        127
+#define AVRCP_VOLUME_UNKNOWN    0xFF
+static btstack_timer_source_t volume_timer;
+static uint8_t volume_last_synced = AVRCP_VOLUME_UNKNOWN;   // last value both sides agreed on
 
 // AVRCP: headset buttons arrive as pass-through commands to our target role
 static uint16_t                avrcp_cid;
@@ -298,11 +307,18 @@ static void print_stats(uint32_t now){
     if ((now - stream.time_stats_ms) < STATS_INTERVAL_MS) return;
     uint32_t elapsed = now - stream.time_stats_ms;
     uint32_t underruns, overruns, buffered_ms;
-    pcm_capture_get_stats(&underruns, &overruns, &buffered_ms);
-    printf("[stats] %s, %u kbps on air, %u pkt/s, buffer %u ms, underruns %u, overruns %u\n",
+    float peak;
+    pcm_capture_get_stats(&underruns, &overruns, &buffered_ms, &peak);
+    char peak_text[16] = "silent";
+    if (peak > 0.00001f) snprintf(peak_text, sizeof(peak_text), "%.1f dBFS", 20.0f * log10f(peak));
+    float volume = 0.0f;
+    bool muted = false;
+    bool have_volume = pcm_capture_get_volume(&volume, &muted);
+    printf("[stats] %s, %u kbps on air, %u pkt/s, buffer %u ms, underruns %u, overruns %u, peak %s, Windows volume %s%d%%\n",
            eqmid_name(ldacBT_get_eqmid(stream.ldac)),
            (unsigned)(stream.bytes_sent * 8 / elapsed), (unsigned)(stream.packets_sent * 1000 / elapsed),
-           (unsigned) buffered_ms, (unsigned) underruns, (unsigned) overruns);
+           (unsigned) buffered_ms, (unsigned) underruns, (unsigned) overruns, peak_text,
+           muted ? "muted " : "", have_volume ? (int) lroundf(volume * 100) : -1);
     stream.bytes_sent = 0;
     stream.packets_sent = 0;
     stream.time_stats_ms = now;
@@ -371,6 +387,54 @@ static void avrcp_set_status(avrcp_playback_status_t status){
     }
 }
 
+// ---- absolute volume ----
+
+static uint8_t windows_volume_as_avrcp(bool * ok){
+    float level;
+    bool muted;
+    *ok = pcm_capture_get_volume(&level, &muted);
+    if (!*ok) return 0;
+    if (muted) return 0;
+    return (uint8_t) lroundf(level * AVRCP_VOLUME_MAX);
+}
+
+// Windows -> headset: poll the endpoint volume (also covers keyboard volume keys and mute)
+static void volume_timer_handler(btstack_timer_source_t * ts){
+    if (avrcp_cid == 0) return;
+    btstack_run_loop_set_timer(ts, VOLUME_POLL_MS);
+    btstack_run_loop_add_timer(ts);
+
+    bool ok;
+    uint8_t volume = windows_volume_as_avrcp(&ok);
+    if (!ok || volume == volume_last_synced) return;
+    // a previous AVRCP command may still be pending; then retry on the next tick
+    if (avrcp_controller_set_absolute_volume(avrcp_cid, volume) == ERROR_CODE_SUCCESS){
+        volume_last_synced = volume;
+    }
+}
+
+// headset -> Windows
+static void volume_from_headset(uint8_t volume){
+    volume &= 0x7F;
+    if (volume == volume_last_synced) return;
+    volume_last_synced = volume;
+    pcm_capture_set_volume((float) volume / AVRCP_VOLUME_MAX);
+    printf("Volume: %u%% (set on headset)\n", (unsigned)(volume * 100 / AVRCP_VOLUME_MAX));
+}
+
+static void volume_sync_start(void){
+    volume_last_synced = AVRCP_VOLUME_UNKNOWN;   // first tick pushes the Windows volume to the headset
+    avrcp_controller_enable_notification(avrcp_cid, AVRCP_NOTIFICATION_EVENT_VOLUME_CHANGED);
+    btstack_run_loop_remove_timer(&volume_timer);
+    btstack_run_loop_set_timer_handler(&volume_timer, &volume_timer_handler);
+    btstack_run_loop_set_timer(&volume_timer, VOLUME_POLL_MS);
+    btstack_run_loop_add_timer(&volume_timer);
+}
+
+static void volume_sync_stop(void){
+    btstack_run_loop_remove_timer(&volume_timer);
+}
+
 static void avrcp_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
     UNUSED(channel);
     UNUSED(size);
@@ -388,10 +452,12 @@ static void avrcp_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t 
             avrcp_target_support_event(avrcp_cid, AVRCP_NOTIFICATION_EVENT_PLAYBACK_STATUS_CHANGED);
             avrcp_target_set_now_playing_info(avrcp_cid, NULL, 0);
             avrcp_target_set_playback_status(avrcp_cid, avrcp_playback_status);
-            printf("AVRCP: connected, headset buttons control Windows media\n");
+            volume_sync_start();
+            printf("AVRCP: connected, headset buttons control Windows media, volume synced\n");
             break;
         case AVRCP_SUBEVENT_CONNECTION_RELEASED:
             avrcp_cid = 0;
+            volume_sync_stop();
             break;
         default:
             break;
@@ -446,10 +512,20 @@ static void avrcp_target_packet_handler(uint8_t packet_type, uint16_t channel, u
 }
 
 static void avrcp_controller_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * packet, uint16_t size){
-    UNUSED(packet_type);
     UNUSED(channel);
-    UNUSED(packet);
     UNUSED(size);
+    if (packet_type != HCI_EVENT_PACKET) return;
+    if (hci_event_packet_get_type(packet) != HCI_EVENT_AVRCP_META) return;
+
+    switch (hci_event_avrcp_meta_get_subevent_code(packet)){
+        case AVRCP_SUBEVENT_NOTIFICATION_VOLUME_CHANGED:
+            // the initial (interim) value is ignored: Windows volume wins on connect
+            if (avrcp_subevent_notification_volume_changed_get_command_type(packet) == AVRCP_CTYPE_RESPONSE_INTERIM) break;
+            volume_from_headset(avrcp_subevent_notification_volume_changed_get_absolute_volume(packet));
+            break;
+        default:
+            break;
+    }
 }
 
 // ---- A2DP events ----
@@ -790,6 +866,11 @@ int btstack_main(int argc, const char * argv[]){
     avrcp_target_create_sdp_record(sdp_avrcp_target_service_buffer, sdp_create_service_record_handle(),
                                    AVRCP_FEATURE_MASK_CATEGORY_PLAYER_OR_RECORDER, NULL, NULL);
     sdp_register_service(sdp_avrcp_target_service_buffer);
+    // Controller record (category 2) tells the headset we drive its absolute volume
+    memset(sdp_avrcp_controller_service_buffer, 0, sizeof(sdp_avrcp_controller_service_buffer));
+    avrcp_controller_create_sdp_record(sdp_avrcp_controller_service_buffer, sdp_create_service_record_handle(),
+                                       AVRCP_FEATURE_MASK_CATEGORY_MONITOR_OR_AMPLIFIER, NULL, NULL);
+    sdp_register_service(sdp_avrcp_controller_service_buffer);
 
     gap_set_local_name("LDAC Bridge 00:00:00:00:00:00");
     gap_discoverable_control(1);

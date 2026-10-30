@@ -6,9 +6,11 @@
 #include <objbase.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <propsys.h>
 #include <mmreg.h>
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,6 +21,7 @@ static const CLSID CLSID_MMDeviceEnumerator_ = {0xBCDE0395, 0xE52F, 0x467C, {0x8
 static const IID   IID_IMMDeviceEnumerator_  = {0xA95664D2, 0x9614, 0x4F35, {0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6}};
 static const IID   IID_IAudioClient_         = {0x1CB9AD4C, 0xDBFA, 0x4C32, {0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2}};
 static const IID   IID_IAudioCaptureClient_  = {0xC8ADBD64, 0xE71E, 0x48A0, {0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17}};
+static const IID   IID_IAudioEndpointVolume_ = {0x5CDF2C82, 0x841E, 0x4546, {0x97, 0x22, 0x0C, 0xF7, 0x40, 0x78, 0x22, 0x9A}};
 static const GUID  SUBTYPE_IEEE_FLOAT_       = {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
 static const GUID  SUBTYPE_PCM_              = {0x00000001, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
 static const PROPERTYKEY PKEY_FriendlyName_  = {{0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 14};
@@ -44,6 +47,8 @@ static int              device_channels;
 static sample_type_t    device_sample_type;
 static HANDLE           capture_ready_event;
 static bool             capture_ok;
+static IAudioEndpointVolume * endpoint_volume;   // used from the main (Bluetooth) thread only
+static float            stat_peak;
 
 // consumer side (Bluetooth thread)
 static uint32_t output_rate;
@@ -156,6 +161,10 @@ static void ring_push(const float * frames, uint32_t num_frames){
         ring[w][0] = frames[2*i];
         ring[w][1] = frames[2*i+1];
         ring_count++;
+        float l = fabsf(frames[2*i]);
+        float r = fabsf(frames[2*i+1]);
+        if (l > stat_peak) stat_peak = l;
+        if (r > stat_peak) stat_peak = r;
     }
     LeaveCriticalSection(&ring_lock);
 }
@@ -296,8 +305,26 @@ bool pcm_capture_start(const char * device_filter){
             printf("Audio: no default playback device\n");
         }
     }
+    if (!capture_device){
+        IMMDeviceEnumerator_Release(enumerator);
+        return false;
+    }
+
+    // volume control: the captured playback device itself, else the default playback device
+    IMMDevice * volume_device = NULL;
+    if (capture_loopback){
+        volume_device = capture_device;
+        IMMDevice_AddRef(volume_device);
+    } else if (FAILED(IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &volume_device))){
+        volume_device = NULL;
+    }
+    if (volume_device){
+        if (FAILED(IMMDevice_Activate(volume_device, &IID_IAudioEndpointVolume_, CLSCTX_ALL, NULL, (void **) &endpoint_volume))){
+            endpoint_volume = NULL;
+        }
+        IMMDevice_Release(volume_device);
+    }
     IMMDeviceEnumerator_Release(enumerator);
-    if (!capture_device) return false;
 
     char name[256];
     get_device_name(capture_device, name, sizeof(name));
@@ -388,12 +415,30 @@ void pcm_capture_read(float * stereo_out, int num_frames){
     LeaveCriticalSection(&ring_lock);
 }
 
-void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t * buffered_ms){
+void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t * buffered_ms, float * peak){
     EnterCriticalSection(&ring_lock);
     *underruns = stat_underruns;
     *overruns = stat_overruns;
     *buffered_ms = device_rate ? ring_count * 1000 / device_rate : 0;
+    *peak = stat_peak;
     stat_underruns = 0;
     stat_overruns = 0;
+    stat_peak = 0.0f;
     LeaveCriticalSection(&ring_lock);
+}
+
+bool pcm_capture_get_volume(float * level, bool * muted){
+    if (!endpoint_volume) return false;
+    BOOL mute = FALSE;
+    if (FAILED(IAudioEndpointVolume_GetMasterVolumeLevelScalar(endpoint_volume, level))) return false;
+    if (FAILED(IAudioEndpointVolume_GetMute(endpoint_volume, &mute))) return false;
+    *muted = mute != FALSE;
+    return true;
+}
+
+void pcm_capture_set_volume(float level){
+    if (!endpoint_volume) return;
+    if (level < 0.0f) level = 0.0f;
+    if (level > 1.0f) level = 1.0f;
+    IAudioEndpointVolume_SetMasterVolumeLevelScalar(endpoint_volume, level, NULL);
 }

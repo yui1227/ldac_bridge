@@ -30,7 +30,12 @@ void pcm_capture_set_output_rate(uint32_t sample_rate);
 // replaced by silence. Never blocks.
 void pcm_capture_read(float * stereo_out, int num_frames);
 
-// Statistics since last call
-void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t * buffered_ms);
+// Statistics since last call. peak: highest absolute captured sample (1.0 = full scale)
+void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t * buffered_ms, float * peak);
+
+// Windows volume of the playback endpoint (the loopback device, or the default
+// playback device when capturing a recording device). level: 0.0 .. 1.0
+bool pcm_capture_get_volume(float * level, bool * muted);
+void pcm_capture_set_volume(float level);
 
 #endif

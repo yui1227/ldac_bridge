@@ -72,7 +72,8 @@ int main(void){
         for (int j = 0; j < 960; j++) if (fabsf(buf[j]) > peak) peak = fabsf(buf[j]);
     }
     uint32_t under, over, ms;
-    pcm_capture_get_stats(&under, &over, &ms);
+    float device_peak;
+    pcm_capture_get_stats(&under, &over, &ms, &device_peak);
     printf("  1 s read: peak %.3f, buffered %u ms, underruns %u, overruns %u\n", peak, ms, under, over);
     pcm_capture_stop();
 
