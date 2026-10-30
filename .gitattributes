@@ -1,0 +1,2 @@
+# keep LF everywhere: shell scripts and patches break with CRLF
+* text=auto eol=lf

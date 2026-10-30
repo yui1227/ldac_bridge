@@ -1,0 +1,12 @@
+# fetched by setup.sh
+/third_party/
+/ldac_bridge/firmware/
+
+# build output
+/ldac_bridge/build/
+*.exe
+
+# runtime files (pairing keys, logs)
+*.pklg
+*.tlv
+last_device.txt
