@@ -825,6 +825,9 @@ int ldac_bridge_setup(int argc, const char * argv[]){
         if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0){
             print_usage(argv[0]);
             return 1;
+        } else if (strcmp(a, "--install") == 0 || strcmp(a, "--uninstall") == 0){
+            printf("Autostart is handled by the tray launcher. Run:  ldac_tray.exe %s\n", a);
+            return -1;
         } else if (strcmp(a, "--list-devices") == 0){
             pcm_capture_list_devices();
             return 1;
