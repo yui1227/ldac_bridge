@@ -8,8 +8,10 @@
 //
 // Battery requests and replies (code, battery type, level, charging[, level, charging]):
 //   protocol v1: request 0x10, reply 0x11, notify 0x13, types single 0x00, dual 0x01, case 0x02
-//   protocol v2: request 0x22, reply 0x23, notify 0x25 - battery type values not confirmed yet,
-//                so all candidates are requested and replies are classified by length
+//   protocol v2: request 0x22, reply 0x23, notify 0x25, types (seen on WF-1000XM6):
+//                single 0x00, dual 0x01, case 0x02, dual 0x09 and case 0x0A (same layout plus
+//                trailing extra bytes). Notifications use 0x09.
+// An earbud that sits in the case is reported with level 0.
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -35,7 +37,11 @@
 #define V2_BATTERY_REPLY    0x23
 #define V2_BATTERY_NOTIFY   0x25
 
-#define V1_BATTERY_TYPE_CASE 0x02
+#define BATTERY_TYPE_SINGLE     0x00
+#define BATTERY_TYPE_DUAL       0x01
+#define BATTERY_TYPE_CASE       0x02
+#define V2_BATTERY_TYPE_DUAL_EX 0x09
+#define V2_BATTERY_TYPE_CASE_EX 0x0A
 
 #define MAX_PAYLOAD         64
 #define MAX_FRAME           (2 * (MAX_PAYLOAD + 7) + 2)
@@ -178,34 +184,42 @@ static void queue_command(uint8_t b0, uint8_t b1){
 
 // ---- battery ----
 
-static void print_level(const char * name, int level, bool charging, bool * first){
-    if (level < 0) return;
-    printf("%s%s %d%%%s", *first ? "" : " | ", name, level, charging ? " (charging)" : "");
-    *first = false;
+static void format_level(char * out, size_t out_size, const char * name, int level, bool charging, bool earbud){
+    if (level < 0){
+        out[0] = 0;
+    } else if (level == 0 && earbud){
+        snprintf(out, out_size, "%s in case", name);
+    } else {
+        snprintf(out, out_size, "%s %d%%%s", name, level, charging ? " (charging)" : "");
+    }
 }
 
+// print only when something changed, replies to polls are usually identical
 static void print_battery(void){
+    static char last_line[128];
+    char parts[4][40];
+    format_level(parts[0], sizeof(parts[0]), "L", level_left, charging_left, true);
+    format_level(parts[1], sizeof(parts[1]), "R", level_right, charging_right, true);
+    format_level(parts[2], sizeof(parts[2]), "Case", level_case, charging_case, false);
+    format_level(parts[3], sizeof(parts[3]), "Headset", (level_left < 0 && level_right < 0) ? level_single : -1, charging_single, false);
+
+    char line[128] = "Battery: ";
     bool first = true;
-    printf("Battery: ");
-    print_level("L", level_left, charging_left, &first);
-    print_level("R", level_right, charging_right, &first);
-    print_level("Case", level_case, charging_case, &first);
-    if (level_left < 0 && level_right < 0){
-        print_level("Headset", level_single, charging_single, &first);
+    for (int i = 0; i < 4; i++){
+        if (!parts[i][0]) continue;
+        if (!first) strcat(line, " | ");
+        strcat(line, parts[i]);
+        first = false;
     }
-    printf("\n");
+    if (first || strcmp(line, last_line) == 0) return;
+    strcpy(last_line, line);
+    printf("%s\n", line);
 }
 
 static void request_battery(void){
-    if (protocol_version == 2){
-        // battery type values for v2 are not confirmed: ask for all candidates
-        const uint8_t types[] = { 0x00, 0x01, 0x02, 0x09, 0x0A };
-        for (unsigned i = 0; i < sizeof(types); i++) queue_command(V2_BATTERY_REQUEST, types[i]);
-    } else {
-        queue_command(V1_BATTERY_REQUEST, 0x00);
-        queue_command(V1_BATTERY_REQUEST, 0x01);
-        queue_command(V1_BATTERY_REQUEST, V1_BATTERY_TYPE_CASE);
-    }
+    uint8_t request = (protocol_version == 2) ? V2_BATTERY_REQUEST : V1_BATTERY_REQUEST;
+    queue_command(request, BATTERY_TYPE_DUAL);
+    queue_command(request, BATTERY_TYPE_CASE);
 }
 
 static void poll_timer_handler(btstack_timer_source_t * ts){
@@ -218,18 +232,26 @@ static void poll_timer_handler(btstack_timer_source_t * ts){
 // payload: code, battery type, level, charging[, level, charging]
 static void handle_battery(const uint8_t * p, uint16_t len){
     if (len < 4) return;
-    uint8_t type = p[1];
-    if (len >= 6){
-        level_left = p[2];
-        charging_left = p[3] != 0;
-        level_right = p[4];
-        charging_right = p[5] != 0;
-    } else if ((protocol_version == 1 && type == V1_BATTERY_TYPE_CASE) || (protocol_version == 2 && type != 0x00)){
-        level_case = p[2];
-        charging_case = p[3] != 0;
-    } else {
-        level_single = p[2];
-        charging_single = p[3] != 0;
+    switch (p[1]){
+        case BATTERY_TYPE_DUAL:
+        case V2_BATTERY_TYPE_DUAL_EX:
+            if (len < 6) return;
+            level_left = p[2];
+            charging_left = p[3] != 0;
+            level_right = p[4];
+            charging_right = p[5] != 0;
+            break;
+        case BATTERY_TYPE_CASE:
+        case V2_BATTERY_TYPE_CASE_EX:
+            level_case = p[2];
+            charging_case = p[3] != 0;
+            break;
+        case BATTERY_TYPE_SINGLE:
+            level_single = p[2];
+            charging_single = p[3] != 0;
+            break;
+        default:
+            return;
     }
     print_battery();
 }
