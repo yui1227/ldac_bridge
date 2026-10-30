@@ -20,7 +20,7 @@ CFLAGS  = -O2 -g -Wall -Wno-unused-function -Wno-format-truncation \
           -I$(LIBLDAC)/inc
 LDLIBS  = -lsetupapi -lwinusb -lole32 -lwinmm -static
 
-SRC_APP      = main.c ldac_source.c pcm_capture.c media_keys.c
+SRC_APP      = main.c ldac_source.c pcm_capture.c media_keys.c sony_battery.c
 SRC_BTSTACK  = $(filter-out %lc3_google.c %lc3plus_fraunhofer.c,$(wildcard $(BTSTACK)/src/*.c)) \
                $(wildcard $(BTSTACK)/src/classic/*.c) \
                $(filter-out %hci_dump_windows_stdout.c,$(wildcard $(BTSTACK)/platform/windows/*.c)) \

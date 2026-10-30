@@ -12,6 +12,7 @@
 #include "ldacBT.h"
 #include "media_keys.h"
 #include "pcm_capture.h"
+#include "sony_battery.h"
 
 #define A2DP_CODEC_VENDOR_ID_SONY   0x0000012D
 #define A2DP_SONY_CODEC_LDAC        0x00AA
@@ -39,6 +40,7 @@ static const char * opt_audio_device;
 static int          opt_eqmid = LDACBT_EQMID_HQ;
 static bool         opt_abr;
 static uint32_t     opt_rate;          // 0 = follow capture device
+static bool         opt_sony_debug;
 static bool         opt_have_addr;
 static bd_addr_t    opt_addr;
 
@@ -578,6 +580,7 @@ static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, ui
             printf("A2DP: streaming LDAC. Play something on Windows. Ctrl-C to quit.\n");
             audio_start();
             avrcp_set_status(AVRCP_PLAYBACK_STATUS_PLAYING);
+            sony_battery_connect(remote_addr);
             break;
 
         case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
@@ -598,6 +601,7 @@ static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, ui
         case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
             printf("A2DP: disconnected\n");
             audio_stop();
+            sony_battery_disconnect();
             stream.a2dp_cid = 0;
             schedule_reconnect();
             break;
@@ -686,6 +690,7 @@ static void print_usage(const char * exe){
     printf("  --rate 44100|48000|96000  LDAC sampling rate (default: same as the captured device)\n");
     printf("  --device TEXT             capture this playback (loopback) or recording device (default: default playback)\n");
     printf("  --list-devices            list audio devices and exit\n");
+    printf("  --sony-debug              print raw Sony control protocol frames (battery levels)\n");
 }
 
 // Returns 0 to continue, >0 to exit successfully, <0 on error. Called before Bluetooth starts.
@@ -702,6 +707,8 @@ int ldac_bridge_setup(int argc, const char * argv[]){
             return 1;
         } else if (strcmp(a, "--scan") == 0){
             force_scan = true;
+        } else if (strcmp(a, "--sony-debug") == 0){
+            opt_sony_debug = true;
         } else if (strcmp(a, "--addr") == 0 && v){
             if (sscanf_bd_addr(v, opt_addr) == 0){ printf("Invalid address '%s'\n", v); return -1; }
             opt_have_addr = true; i++;
@@ -750,6 +757,7 @@ int btstack_main(int argc, const char * argv[]){
     gap_ssp_set_authentication_requirement(SSP_IO_AUTHREQ_MITM_PROTECTION_NOT_REQUIRED_GENERAL_BONDING);
 
     l2cap_init();
+    sony_battery_init(opt_sony_debug);
 
     a2dp_source_init();
     a2dp_source_register_packet_handler(&a2dp_source_packet_handler);
