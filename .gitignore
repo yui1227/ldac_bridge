@@ -8,5 +8,6 @@
 
 # runtime files (pairing keys, logs)
 *.pklg
+*.log
 *.tlv
 last_device.txt

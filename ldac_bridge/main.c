@@ -47,13 +47,54 @@ static bool shutdown_triggered;
 static char exe_dir[MAX_PATH];
 static char firmware_dir[MAX_PATH];
 
+// Controller heartbeat: BTstack's WinUSB transport only logs USB errors (e.g. after
+// sleep/resume or unplug) and then goes silent. Ask the controller regularly and exit
+// when it stops answering, so the tray launcher restarts us.
+#define HEARTBEAT_INTERVAL_MS   10000
+#define HEARTBEAT_MAX_MISSED    3
+#define EXIT_CODE_CONTROLLER_LOST 3
+
+// Set by ldac_tray.exe to request a clean shutdown
+#define QUIT_EVENT_NAME "Local\\ldac_bridge_quit"
+
+static btstack_timer_source_t heartbeat_timer;
+static bool heartbeat_pending;
+static int  heartbeat_missed;
+static btstack_context_callback_registration_t quit_callback;
+
+static void heartbeat_handler(btstack_timer_source_t * ts){
+    if (heartbeat_pending || !hci_can_send_command_packet_now()){
+        heartbeat_missed++;
+        if (heartbeat_missed >= HEARTBEAT_MAX_MISSED){
+            printf("Bluetooth controller stopped responding (USB reset or sleep?), exiting\n");
+            printf("@event fatal controller lost\n");
+            exit(EXIT_CODE_CONTROLLER_LOST);
+        }
+    }
+    if (hci_can_send_command_packet_now()){
+        heartbeat_pending = true;
+        hci_send_cmd(&hci_read_local_version_information);
+    }
+    btstack_run_loop_set_timer(ts, HEARTBEAT_INTERVAL_MS);
+    btstack_run_loop_add_timer(ts);
+}
+
 static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
     UNUSED(channel);
     UNUSED(size);
     if (packet_type != HCI_EVENT_PACKET) return;
+    if (hci_event_packet_get_type(packet) == HCI_EVENT_COMMAND_COMPLETE &&
+        hci_event_command_complete_get_command_opcode(packet) == hci_read_local_version_information.opcode){
+        heartbeat_pending = false;
+        heartbeat_missed = 0;
+        return;
+    }
     if (hci_event_packet_get_type(packet) != BTSTACK_EVENT_STATE) return;
     switch (btstack_event_state_get_state(packet)){
         case HCI_STATE_WORKING:
+            btstack_run_loop_set_timer_handler(&heartbeat_timer, &heartbeat_handler);
+            btstack_run_loop_set_timer(&heartbeat_timer, HEARTBEAT_INTERVAL_MS);
+            btstack_run_loop_add_timer(&heartbeat_timer);
             gap_local_bd_addr(local_addr);
             printf("BTstack up and running on %s.\n", bd_addr_to_str(local_addr));
             // setup TLV next to the executable, so pairing survives restarts
@@ -76,9 +117,23 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
 }
 
 static void trigger_shutdown(void){
-    printf("CTRL-C received, shutting down...\n");
+    printf("Shutting down...\n");
     shutdown_triggered = true;
+    btstack_run_loop_remove_timer(&heartbeat_timer);
     hci_power_control(HCI_POWER_OFF);
+}
+
+static void quit_on_main_thread(void * context){
+    UNUSED(context);
+    trigger_shutdown();
+}
+
+static DWORD WINAPI quit_event_thread(LPVOID arg){
+    HANDLE quit_event = (HANDLE) arg;
+    WaitForSingleObject(quit_event, INFINITE);
+    quit_callback.callback = &quit_on_main_thread;
+    btstack_run_loop_execute_on_main_thread(&quit_callback);
+    return 0;
 }
 
 static void intel_firmware_done(int result){
@@ -135,6 +190,12 @@ int main(int argc, const char * argv[]){
 
     btstack_stdin_windows_init();
     btstack_stdin_window_register_ctrl_c_callback(&trigger_shutdown);
+
+    HANDLE quit_event = CreateEventA(NULL, TRUE, FALSE, QUIT_EVENT_NAME);
+    if (quit_event){
+        ResetEvent(quit_event);
+        CreateThread(NULL, 0, quit_event_thread, quit_event, 0, NULL);
+    }
 
     transport = hci_transport_usb_instance();
     btstack_chipset_intel_set_firmware_path(firmware_dir);

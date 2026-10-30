@@ -23,7 +23,12 @@
 #define LDAC_MEDIA_HEADER_LEN       1
 
 #define AUDIO_TIMER_MS              4
-#define RECONNECT_DELAY_MS          5000
+// Like Windows: try to reach the headset a limited number of times (5 s, 10 s, 20 s, ... up to 60 s
+// apart, about 6 minutes in total), then stay connectable and let the headset reconnect by itself
+// when it is turned on or taken out of the case.
+#define RECONNECT_MAX_ATTEMPTS      10
+#define RECONNECT_FIRST_DELAY_MS    5000
+#define RECONNECT_MAX_DELAY_MS      60000
 #define STATS_INTERVAL_MS           5000
 #define INQUIRY_DURATION_1280MS     8
 
@@ -47,6 +52,8 @@ static bd_addr_t    opt_addr;
 
 static bd_addr_t remote_addr;
 static bool      remote_addr_valid;
+static char      remote_name[64];
+static int       reconnect_attempts;
 static bool      scan_active;
 static bool      shutting_down;
 
@@ -202,9 +209,19 @@ static void reconnect_timer_handler(btstack_timer_source_t * ts){
 
 static void schedule_reconnect(void){
     if (shutting_down || !remote_addr_valid) return;
+    if (reconnect_attempts >= RECONNECT_MAX_ATTEMPTS){
+        printf("Headset not reachable. Waiting for it to connect (turn it on or take it out of the case).\n");
+        printf("@event waiting\n");
+        return;
+    }
+    uint32_t delay = RECONNECT_FIRST_DELAY_MS;
+    for (int i = 0; i < reconnect_attempts && delay < RECONNECT_MAX_DELAY_MS; i++) delay *= 2;
+    if (delay > RECONNECT_MAX_DELAY_MS) delay = RECONNECT_MAX_DELAY_MS;
+    reconnect_attempts++;
+    printf("Retrying in %u s (attempt %d of %d)\n", (unsigned)(delay / 1000), reconnect_attempts, RECONNECT_MAX_ATTEMPTS);
     btstack_run_loop_remove_timer(&reconnect_timer);
     btstack_run_loop_set_timer_handler(&reconnect_timer, &reconnect_timer_handler);
-    btstack_run_loop_set_timer(&reconnect_timer, RECONNECT_DELAY_MS);
+    btstack_run_loop_set_timer(&reconnect_timer, delay);
     btstack_run_loop_add_timer(&reconnect_timer);
 }
 
@@ -598,7 +615,18 @@ static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, ui
                 break;
             }
             stream.a2dp_cid = a2dp_subevent_signaling_connection_established_get_a2dp_cid(packet);
+            // connectable for the known headset only; anything else is dropped
+            if (remote_addr_valid && bd_addr_cmp(address, remote_addr) != 0){
+                printf("A2DP: ignoring connection from unknown device %s\n", bd_addr_to_str(address));
+                a2dp_source_disconnect(stream.a2dp_cid);
+                stream.a2dp_cid = 0;
+                break;
+            }
             stream.remote_has_ldac = false;
+            reconnect_attempts = 0;
+            if (remote_name[0] == 0){
+                gap_remote_name_request(address, 1, 0);
+            }
             memcpy(remote_addr, address, 6);
             remote_addr_valid = true;
             save_last_device(address);
@@ -657,6 +685,7 @@ static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, ui
             audio_start();
             avrcp_set_status(AVRCP_PLAYBACK_STATUS_PLAYING);
             sony_battery_connect(remote_addr);
+            printf("@event connected %s %s\n", bd_addr_to_str(remote_addr), remote_name[0] ? remote_name : "headphones");
             break;
 
         case A2DP_SUBEVENT_STREAMING_CAN_SEND_MEDIA_PACKET_NOW:
@@ -675,7 +704,10 @@ static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, ui
             break;
 
         case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:
+            // e.g. a rejected unknown device
+            if (a2dp_subevent_signaling_connection_released_get_a2dp_cid(packet) != stream.a2dp_cid) break;
             printf("A2DP: disconnected\n");
+            printf("@event disconnected\n");
             audio_stop();
             sony_battery_disconnect();
             stream.a2dp_cid = 0;
@@ -716,8 +748,22 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * 
 
         case HCI_EVENT_USER_CONFIRMATION_REQUEST:
             hci_event_user_confirmation_request_get_bd_addr(packet, address);
-            printf("Pairing with %s\n", bd_addr_to_str(address));
-            gap_ssp_confirmation_response(address);
+            // we stay connectable in the background: only pair with the headset we chose
+            if (scan_active || (remote_addr_valid && bd_addr_cmp(address, remote_addr) == 0)){
+                printf("Pairing with %s\n", bd_addr_to_str(address));
+                gap_ssp_confirmation_response(address);
+            } else {
+                printf("Rejecting pairing request from %s\n", bd_addr_to_str(address));
+                gap_ssp_confirmation_negative(address);
+            }
+            break;
+
+        case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
+            hci_event_remote_name_request_complete_get_bd_addr(packet, address);
+            if (hci_event_remote_name_request_complete_get_status(packet) == ERROR_CODE_SUCCESS &&
+                remote_addr_valid && bd_addr_cmp(address, remote_addr) == 0){
+                btstack_strcpy(remote_name, sizeof(remote_name), hci_event_remote_name_request_complete_get_remote_name(packet));
+            }
             break;
 
         case GAP_EVENT_INQUIRY_RESULT: {
@@ -739,6 +785,7 @@ static void hci_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t * 
                 gap_inquiry_stop();
                 memcpy(remote_addr, address, 6);
                 remote_addr_valid = true;
+                btstack_strcpy(remote_name, sizeof(remote_name), name);
                 connect_to_remote();
             }
             break;
@@ -873,7 +920,9 @@ int btstack_main(int argc, const char * argv[]){
     sdp_register_service(sdp_avrcp_controller_service_buffer);
 
     gap_set_local_name("LDAC Bridge 00:00:00:00:00:00");
-    gap_discoverable_control(1);
+    // not discoverable (we always initiate pairing), but connectable so the headset can reconnect
+    gap_discoverable_control(0);
+    gap_connectable_control(1);
     gap_set_class_of_device(0x200408);
 
     hci_event_callback_registration.callback = &hci_packet_handler;

@@ -36,7 +36,11 @@ OBJ_LIB      = $(addprefix build/,$(notdir $(SRC_LIB:.c=.o)))
 
 vpath %.c $(sort $(dir $(SRC_APP) $(SRC_LIB)))
 
-all: ldac_bridge.exe
+all: ldac_bridge.exe ldac_tray.exe
+
+# GUI launcher: no console window, no BTstack
+ldac_tray.exe: tray/ldac_tray.c
+	$(CC) -O2 -Wall -municode -mwindows -o $@ $< -lshell32 -static
 
 # static library: only modules actually referenced get linked
 build/libbtstack.a: $(OBJ_LIB)

@@ -195,8 +195,9 @@ static void format_level(char * out, size_t out_size, const char * name, int lev
 }
 
 // print only when something changed, replies to polls are usually identical
+static char battery_last_line[128];
+
 static void print_battery(void){
-    static char last_line[128];
     char parts[4][40];
     format_level(parts[0], sizeof(parts[0]), "L", level_left, charging_left, true);
     format_level(parts[1], sizeof(parts[1]), "R", level_right, charging_right, true);
@@ -211,9 +212,13 @@ static void print_battery(void){
         strcat(line, parts[i]);
         first = false;
     }
-    if (first || strcmp(line, last_line) == 0) return;
-    strcpy(last_line, line);
+    if (first || strcmp(line, battery_last_line) == 0) return;
+    strcpy(battery_last_line, line);
     printf("%s\n", line);
+    // machine readable for the tray launcher: level -1 = unknown, earbud level 0 = in case
+    printf("@event battery L=%d R=%d C=%d H=%d Lc=%d Rc=%d Cc=%d\n",
+           level_left, level_right, level_case, level_single,
+           charging_left, charging_right, charging_case);
 }
 
 static void request_battery(void){
@@ -489,6 +494,7 @@ void sony_battery_connect(bd_addr_t addr){
     memcpy(remote, addr, 6);
     rfcomm_channel = 0;
     level_left = level_right = level_case = level_single = -1;
+    battery_last_line[0] = 0;
     state = debug_enabled ? STATE_SDP_LIST : STATE_SDP_V2;
     start_sdp_query();
 }
