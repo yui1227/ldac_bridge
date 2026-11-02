@@ -1,0 +1,20 @@
+--- a/src/classic/avrcp_target.c	2026-10-30 15:19:37.730127400 +0800
++++ b/src/classic/avrcp_target.c	2026-10-30 15:19:37.755768100 +0800
+@@ -1135,12 +1135,15 @@
+ 
+             operand = &packet[pos];
+ 
++            // ldac_bridge patch: echo the full operation byte incl. state flag (bit 7), as required by
++            // AV/C pass-through. Otherwise release responses look like press responses and some
++            // headsets (Sony WF-1000XM6) keep retransmitting the release command forever.
+             if (avcrp_operation_id_is_valid(operation_id)){
+                 bool button_pressed = (operation & 0x80) == 0u;
+-                avrcp_target_pass_through_response(connection->avrcp_cid, AVRCP_CTYPE_RESPONSE_ACCEPTED, operation_id, operation_data_field_length, operand);
++                avrcp_target_pass_through_response(connection->avrcp_cid, AVRCP_CTYPE_RESPONSE_ACCEPTED, (avrcp_operation_id_t) operation, operation_data_field_length, operand);
+                 avrcp_target_emit_operation(avrcp_target_context.avrcp_callback, connection->avrcp_cid, operation_id, button_pressed, operation_data_field_length, operand);
+             } else {
+-                avrcp_target_pass_through_response(connection->avrcp_cid, AVRCP_CTYPE_RESPONSE_NOT_IMPLEMENTED, operation_id, operation_data_field_length, operand);
++                avrcp_target_pass_through_response(connection->avrcp_cid, AVRCP_CTYPE_RESPONSE_NOT_IMPLEMENTED, (avrcp_operation_id_t) operation, operation_data_field_length, operand);
+             }
+             break;
+ 
