@@ -325,16 +325,18 @@ static void print_stats(uint32_t now){
     uint32_t elapsed = now - stream.time_stats_ms;
     uint32_t underruns, overruns, buffered_ms;
     float peak;
-    pcm_capture_get_stats(&underruns, &overruns, &buffered_ms, &peak);
+    int drift_ppm;
+    pcm_capture_get_stats(&underruns, &overruns, &buffered_ms, &peak, &drift_ppm);
     char peak_text[16] = "silent";
     if (peak > 0.00001f) snprintf(peak_text, sizeof(peak_text), "%.1f dBFS", 20.0f * log10f(peak));
     float volume = 0.0f;
     bool muted = false;
     bool have_volume = pcm_capture_get_volume(&volume, &muted);
-    printf("[stats] %s, %u kbps on air, %u pkt/s, buffer %u ms, underruns %u, overruns %u, peak %s, Windows volume %s%d%%\n",
+    printf("[stats] %s, %u kbps on air, %u pkt/s, buffer %u/%u ms, drift %+d ppm, underruns %u, overruns %u, peak %s, Windows volume %s%d%%\n",
            eqmid_name(ldacBT_get_eqmid(stream.ldac)),
            (unsigned)(stream.bytes_sent * 8 / elapsed), (unsigned)(stream.packets_sent * 1000 / elapsed),
-           (unsigned) buffered_ms, (unsigned) underruns, (unsigned) overruns, peak_text,
+           (unsigned) buffered_ms, (unsigned) pcm_capture_get_latency_ms(), drift_ppm,
+           (unsigned) underruns, (unsigned) overruns, peak_text,
            muted ? "muted " : "", have_volume ? (int) lroundf(volume * 100) : -1);
     stream.bytes_sent = 0;
     stream.packets_sent = 0;
@@ -813,6 +815,7 @@ static void print_usage(const char * exe){
     printf("  --rate 44100|48000|96000  LDAC sampling rate (default: same as the captured device)\n");
     printf("  --device TEXT             capture this playback (loopback) or recording device (default: default playback)\n");
     printf("  --list-devices            list audio devices and exit\n");
+    printf("  --latency MS              capture buffer target, 10..500 ms (default 30; raise if sound drops out)\n");
     printf("  --sony-debug              print raw Sony control protocol frames (battery levels)\n");
 }
 
@@ -845,6 +848,10 @@ int ldac_bridge_setup(int argc, const char * argv[]){
         } else if (strcmp(a, "--rate") == 0 && v){
             opt_rate = (uint32_t) atoi(v); i++;
             if (!ldac_rate_to_freq_bit(opt_rate)){ printf("Unsupported rate %s\n", v); return -1; }
+        } else if (strcmp(a, "--latency") == 0 && v){
+            int ms = atoi(v); i++;
+            if (ms <= 0){ printf("Invalid latency '%s'\n", v); return -1; }
+            pcm_capture_set_latency_ms((uint32_t) ms);
         } else if (strcmp(a, "--quality") == 0 && v){
             if      (strcmp(v, "hq") == 0)  opt_eqmid = LDACBT_EQMID_HQ;
             else if (strcmp(v, "sq") == 0)  opt_eqmid = LDACBT_EQMID_SQ;

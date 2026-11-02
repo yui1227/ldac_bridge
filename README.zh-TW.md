@@ -24,7 +24,7 @@ Windows 播放 → 虛擬音效卡 (VB-CABLE) → WASAPI 擷取 → libldac 編�
 - **藍牙控制器會從 Windows 拿走。** 必須把控制器的驅動換成 WinUSB，換了之後，Windows 原本的藍牙功能（滑鼠、鍵盤、手把、其他耳機）在這個控制器上都不能用。兩者都需要的話，請另外準備一支藍牙 dongle。這個改動可以還原，見[還原成 Windows 藍牙](#還原成-windows-藍牙)。
 - **目前只測試過一種控制器**，見[支援的硬體](#支援的硬體)。
 - **沒有麥克風。** 只實作 A2DP 播放，沒有通話用的耳機麥克風（HFP）。
-- **延遲約 100～200 ms。** 聽音樂沒問題，看影片可能稍微不同步。
+- **延遲約 150～200 ms**，大部分在耳機內部。聽音樂沒問題；看影片時，可以用播放器的音訊延遲設定對齊（VLC、mpv、MPC-HC、PotPlayer）。
 - **僅限非商業用途**，見[授權](#授權)。
 
 ## 支援的硬體
@@ -99,7 +99,7 @@ A2DP: connected to XX:XX:XX:XX:XX:XX, querying codecs...
 Selecting LDAC 48000 Hz stereo
 A2DP: LDAC configured, 48000 Hz
 A2DP: streaming LDAC. Play something on Windows. Ctrl-C to quit.
-[stats] HQ 990 kbps, 9xx kbps on air, ...
+[stats] HQ 990 kbps, 9xx kbps on air, 187 pkt/s, buffer 28/30 ms, drift +12 ppm, ...
 Battery: L 80% | R 79% | Case 67%
 ```
 
@@ -130,6 +130,7 @@ Windows 顯示語言是中文時，系統匣介面為繁體中文，其他語言
 | 參數 | 說明 |
 |---|---|
 | `--quality hq\|sq\|mq\|abr` | 990 / 660 / 330 kbps，或從 990 起跳的自適應。斷音時改用 `abr` 或 `sq` |
+| `--latency 30` | 擷取緩衝，單位 ms，範圍 10～500（預設 30）。越低延遲越小；電腦忙碌時斷音就調高 |
 | `--rate 96000` | LDAC 取樣率（預設跟擷取裝置相同，通常是 48 kHz） |
 | `--device "CABLE Output"` | 指定擷取裝置（預設是預設播放裝置的 loopback） |
 | `--addr XX:XX:XX:XX:XX:XX` | 連線到指定位址 |
@@ -148,7 +149,7 @@ Windows 顯示語言是中文時，系統匣介面為繁體中文，其他語言
 
 - **`Intel firmware setup failed`**：`firmware/` 裡沒有你的控制器對應的韌體，或控制器不在 bootloader 狀態。請完整關機再開機。
 - **顯示串流中但沒聲音**：確認 Windows 的輸出裝置是 CABLE Input，且播放時 `[stats]` 那行的 `peak` 有在變動。
-- **斷音**：改用 `--quality abr` 或 `--quality sq`，並讓控制器的天線遠離 USB 3 連接埠和線材。
+- **斷音**：如果 `[stats]` 那行的 `underruns` 有增加，把 `--latency` 調高（例如 50）。否則改用 `--quality abr` 或 `--quality sq`，並讓控制器的天線遠離 USB 3 連接埠和線材。
 - **睡眠喚醒後藍牙沒反應**：`ldac_tray.exe` 會自動重新啟動；單獨執行 `ldac_bridge.exe` 時，程式會結束，需要再手動啟動。
 - **封包記錄**：`hci_dump.pklg`（以及上一次執行的 `hci_dump.prev.pklg`）可以用 Wireshark 開啟。
 - **Windows Update 之後**原本的驅動可能被裝回去，重做第 3 步即可。
@@ -185,7 +186,7 @@ ldac_bridge/offline_test.exe               # 最後一行應該是 OK
 
 ## 已知限制
 
-- 音效卡和藍牙的時脈漂移靠丟棄或補零處理，大約每幾分鐘可能出現一次極短的爆音。
+- 音效卡和藍牙的時脈漂移，靠重取樣時加快或放慢最多 ±0.2% 來補償（`[stats]` 那行的 `drift`），聽不出來。
 - 只使用 Classic 藍牙，不使用 LE Audio。
 - Windows 只有「播放/暫停切換」一個鍵，如果耳機和播放程式的狀態不同步，多按一次就好。
 

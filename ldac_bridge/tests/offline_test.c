@@ -1,9 +1,12 @@
 // Offline checks that need no Bluetooth hardware:
 //  1. LDAC encoder: packet sizes, frames per packet and resulting bitrate per quality mode
-//  2. WASAPI capture: start default device, pull 1 s at 48 kHz, report level and buffer stats
+//  2. Jitter buffer: simulated clock drift between capture and Bluetooth timer, checks that
+//     the buffer stays at the target latency without dropouts
+//  3. WASAPI capture: start default device, pull 1 s at 48 kHz, report level and buffer stats
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <windows.h>
 
@@ -46,6 +49,54 @@ static int test_ldac(int sample_rate, int eqmid, int mtu){
     return (max_packet <= mtu) ? 0 : 1;
 }
 
+// Capture delivers 10 ms chunks on a clock off by drift_ppm; the Bluetooth side reads
+// 128 frames per encode from a 4 ms timer, like ldac_source.c. 10 simulated minutes.
+static int test_drift(int drift_ppm, uint32_t latency_ms){
+    const uint32_t rate = 48000;
+    pcm_capture_test_init(rate);
+    pcm_capture_set_latency_ms(latency_ms);
+    pcm_capture_set_output_rate(rate);
+
+    static float chunk[480 * 2];
+    float out[128 * 2];
+    const double capture_period_us = 10000.0 / (1.0 + drift_ppm * 1e-6);
+    double next_capture_us = 0.0;
+    double frames_due = 0.0;
+    uint32_t underruns = 0, overruns = 0, min_ms = 1000, max_ms = 0;
+    double sum_ms = 0.0, sum_correction = 0.0;
+    long samples = 0;
+    int correction = 0;
+    for (uint64_t t_us = 0; t_us < 600000000ULL; t_us += 4000){
+        while (next_capture_us <= (double) t_us){
+            pcm_capture_test_push(chunk, 480);
+            next_capture_us += capture_period_us;
+        }
+        frames_due += rate * 0.004;
+        while (frames_due >= 128.0){
+            pcm_capture_read(out, 128);
+            frames_due -= 128.0;
+        }
+        uint32_t u, o, ms;
+        float peak;
+        pcm_capture_get_stats(&u, &o, &ms, &peak, &correction);
+        if (t_us < 60000000ULL) continue;       // settle for the first minute
+        underruns += u;
+        overruns += o;
+        if (ms < min_ms) min_ms = ms;
+        if (ms > max_ms) max_ms = ms;
+        sum_ms += ms;
+        sum_correction += correction;
+        samples++;
+    }
+    double mean_ms = sum_ms / samples;
+    double mean_correction = sum_correction / samples;
+    bool ok = underruns == 0 && overruns == 0 && fabs(mean_ms - latency_ms) < 5.0 && fabs(mean_correction - drift_ppm) < 50.0;
+    printf("  drift %+5d ppm, target %3u ms: buffer %.1f ms (%u..%u), correction %+.0f ppm (mean), underruns %u, overruns %u  %s\n",
+           drift_ppm, (unsigned) latency_ms, mean_ms, (unsigned) min_ms, (unsigned) max_ms, mean_correction,
+           (unsigned) underruns, (unsigned) overruns, ok ? "ok" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int main(void){
     int failures = 0;
     printf("LDAC encoder (libldac version 0x%06x)\n", ldacBT_get_version());
@@ -58,22 +109,38 @@ int main(void){
     // smaller MTU as used by some headsets
     failures += test_ldac(48000, LDACBT_EQMID_HQ, 679);
 
+    printf("\nJitter buffer drift compensation\n");
+    const int drifts[] = { 0, 300, -300, 1000, -1000 };
+    for (int d = 0; d < 5; d++){
+        failures += test_drift(drifts[d], 30);
+    }
+    failures += test_drift(200, 15);
+    pcm_capture_set_latency_ms(30);
+
     printf("\nWASAPI capture\n");
     if (!pcm_capture_start(NULL)){
         printf("  capture start failed\n");
         return 1;
     }
     pcm_capture_set_output_rate(48000);
-    float buf[480 * 2];
+    float buf[128 * 2];
     float peak = 0;
-    for (int i = 0; i < 100; i++){       // 100 x 10 ms
-        Sleep(10);
-        pcm_capture_read(buf, 480);
-        for (int j = 0; j < 960; j++) if (fabsf(buf[j]) > peak) peak = fabsf(buf[j]);
+    // read at real time like the Bluetooth timer, for 1 s
+    ULONGLONG start = GetTickCount64();
+    uint64_t frames_read = 0;
+    while (GetTickCount64() - start < 1000){
+        Sleep(4);
+        uint64_t frames_due = (GetTickCount64() - start) * 48;
+        while (frames_read + 128 <= frames_due){
+            pcm_capture_read(buf, 128);
+            frames_read += 128;
+            for (int j = 0; j < 256; j++) if (fabsf(buf[j]) > peak) peak = fabsf(buf[j]);
+        }
     }
     uint32_t under, over, ms;
     float device_peak;
-    pcm_capture_get_stats(&under, &over, &ms, &device_peak);
+    int drift;
+    pcm_capture_get_stats(&under, &over, &ms, &device_peak, &drift);
     printf("  1 s read: peak %.3f, buffered %u ms, underruns %u, overruns %u\n", peak, ms, under, over);
     pcm_capture_stop();
 

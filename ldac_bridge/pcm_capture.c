@@ -27,9 +27,21 @@ static const GUID  SUBTYPE_PCM_              = {0x00000001, 0x0000, 0x0010, {0x8
 static const PROPERTYKEY PKEY_FriendlyName_  = {{0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 14};
 
 #define LOOPBACK_FLAG       0x00020000  // AUDCLNT_STREAMFLAGS_LOOPBACK
+#define EVENTCALLBACK_FLAG  0x00040000  // AUDCLNT_STREAMFLAGS_EVENTCALLBACK
 #define RING_FRAMES         (192000 * 2)
-#define PREBUFFER_MS        50
-#define MAX_BUFFER_MS       250
+#define CAPTURE_WAIT_MS     10          // poll anyway if the engine does not signal (older Windows, loopback quirks)
+
+// Jitter buffer: the buffer level is held at the target latency by running the resampler
+// slightly faster or slower (clock drift between the audio device and the Bluetooth timer),
+// instead of dropping or inserting samples.
+#define DEFAULT_LATENCY_MS  30
+#define MIN_LATENCY_MS      10
+#define MAX_LATENCY_MS      500
+#define OVERRUN_MARGIN_MS   100         // above target + margin: something stalled, jump back to target
+#define LEVEL_SMOOTHING     0.002       // per read (~375 reads/s): about 1.3 s time constant
+#define PPM_PER_MS          200.0       // proportional: rate correction per ms of level error
+#define INTEGRAL_TIME_S     30.0        // integral: removes the steady-state offset caused by constant drift
+#define MAX_CORRECTION_PPM  2000.0      // 0.2 %, about 3.5 cents: inaudible
 
 typedef enum { SAMPLE_F32, SAMPLE_S16, SAMPLE_S24, SAMPLE_S32 } sample_type_t;
 
@@ -57,6 +69,10 @@ static double   resample_phase;
 static float    resample_prev[2];
 static float    resample_cur[2];
 static bool     jitter_running;
+static uint32_t latency_ms = DEFAULT_LATENCY_MS;
+static double   level_average;      // smoothed ring_count in frames
+static double   integral_ppm;       // integral part of the correction, persists across underruns
+static double   correction_ppm;
 static uint32_t stat_underruns;
 static uint32_t stat_overruns;
 
@@ -219,6 +235,7 @@ static DWORD WINAPI capture_thread_main(LPVOID arg){
 
     IAudioClient * client = NULL;
     IAudioCaptureClient * capture = NULL;
+    HANDLE data_event = NULL;
     WAVEFORMATEX * mix_format = NULL;
     float * convert_buffer = NULL;
     HRESULT hr;
@@ -229,8 +246,25 @@ static DWORD WINAPI capture_thread_main(LPVOID arg){
     hr = IAudioClient_GetMixFormat(client, &mix_format);
     if (FAILED(hr) || !parse_format(mix_format)){ printf("Audio: unsupported mix format\n"); goto done; }
 
-    hr = IAudioClient_Initialize(client, AUDCLNT_SHAREMODE_SHARED, capture_loopback ? LOOPBACK_FLAG : 0,
+    // event driven: the engine signals each period (10 ms) instead of us polling
+    DWORD stream_flags = capture_loopback ? LOOPBACK_FLAG : 0;
+    hr = IAudioClient_Initialize(client, AUDCLNT_SHAREMODE_SHARED, stream_flags | EVENTCALLBACK_FLAG,
                                  1000000 /* 100 ms */, 0, mix_format, NULL);
+    if (SUCCEEDED(hr)){
+        data_event = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (data_event && FAILED(IAudioClient_SetEventHandle(client, data_event))){
+            CloseHandle(data_event);
+            data_event = NULL;
+        }
+    } else {
+        // older Windows: event callback not supported together with loopback
+        IAudioClient_Release(client);
+        client = NULL;
+        hr = IMMDevice_Activate(capture_device, &IID_IAudioClient_, CLSCTX_ALL, NULL, (void **) &client);
+        if (SUCCEEDED(hr)){
+            hr = IAudioClient_Initialize(client, AUDCLNT_SHAREMODE_SHARED, stream_flags, 1000000, 0, mix_format, NULL);
+        }
+    }
     if (FAILED(hr)) { printf("Audio: Initialize failed 0x%08lx\n", hr); goto done; }
 
     hr = IAudioClient_GetService(client, &IID_IAudioCaptureClient_, (void **) &capture);
@@ -250,7 +284,8 @@ static DWORD WINAPI capture_thread_main(LPVOID arg){
         UINT32 packet_frames = 0;
         if (FAILED(IAudioCaptureClient_GetNextPacketSize(capture, &packet_frames))) break;
         if (packet_frames == 0){
-            Sleep(3);
+            if (data_event) WaitForSingleObject(data_event, CAPTURE_WAIT_MS);
+            else Sleep(3);
             continue;
         }
         BYTE * data;
@@ -276,6 +311,7 @@ static DWORD WINAPI capture_thread_main(LPVOID arg){
 
 done:
     if (!capture_ok) SetEvent(capture_ready_event);
+    if (data_event) CloseHandle(data_event);
     free(convert_buffer);
     if (mix_format) CoTaskMemFree(mix_format);
     if (capture) IAudioCaptureClient_Release(capture);
@@ -284,8 +320,18 @@ done:
     return 0;
 }
 
+static void ring_reset(void){
+    static bool lock_ready;
+    if (!lock_ready){
+        InitializeCriticalSection(&ring_lock);
+        lock_ready = true;
+    }
+    ring_read = 0;
+    ring_count = 0;
+}
+
 bool pcm_capture_start(const char * device_filter){
-    InitializeCriticalSection(&ring_lock);
+    ring_reset();
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
 
     IMMDeviceEnumerator * enumerator = create_enumerator();
@@ -363,24 +409,53 @@ void pcm_capture_set_output_rate(uint32_t sample_rate){
     memset(resample_prev, 0, sizeof(resample_prev));
     memset(resample_cur, 0, sizeof(resample_cur));
     jitter_running = false;
+    integral_ppm = 0.0;
+    correction_ppm = 0.0;
     LeaveCriticalSection(&ring_lock);
 }
 
+void pcm_capture_set_latency_ms(uint32_t ms){
+    if (ms < MIN_LATENCY_MS) ms = MIN_LATENCY_MS;
+    if (ms > MAX_LATENCY_MS) ms = MAX_LATENCY_MS;
+    latency_ms = ms;
+}
+
+uint32_t pcm_capture_get_latency_ms(void){
+    return latency_ms;
+}
+
 void pcm_capture_read(float * stereo_out, int num_frames){
-    const uint32_t prebuffer = device_rate * PREBUFFER_MS / 1000;
-    const uint32_t max_buffer = device_rate * MAX_BUFFER_MS / 1000;
+    const uint32_t target = device_rate * latency_ms / 1000;
+    const uint32_t max_buffer = device_rate * (latency_ms + OVERRUN_MARGIN_MS) / 1000;
 
     EnterCriticalSection(&ring_lock);
 
-    if (!jitter_running && ring_count >= prebuffer){
+    if (!jitter_running && ring_count >= target){
         jitter_running = true;
+        level_average = ring_count;
     }
     if (jitter_running && ring_count > max_buffer){
-        // input clock faster than Bluetooth clock or stall: drop back to target latency
-        uint32_t drop = ring_count - prebuffer;
+        // stall on the Bluetooth side: drop back to target latency
+        uint32_t drop = ring_count - target;
         ring_read = (ring_read + drop) % RING_FRAMES;
         ring_count -= drop;
+        level_average = ring_count;
         stat_overruns++;
+    }
+
+    // drift compensation: consume slightly faster when above target, slower when below
+    double step = resample_step;
+    if (jitter_running){
+        level_average += (ring_count - level_average) * LEVEL_SMOOTHING;
+        double error_ms = (level_average - target) * 1000.0 / device_rate;
+        double dt_s = (double) num_frames / output_rate;
+        integral_ppm += error_ms * PPM_PER_MS * dt_s / INTEGRAL_TIME_S;
+        if (integral_ppm >  MAX_CORRECTION_PPM) integral_ppm =  MAX_CORRECTION_PPM;
+        if (integral_ppm < -MAX_CORRECTION_PPM) integral_ppm = -MAX_CORRECTION_PPM;
+        correction_ppm = error_ms * PPM_PER_MS + integral_ppm;
+        if (correction_ppm >  MAX_CORRECTION_PPM) correction_ppm =  MAX_CORRECTION_PPM;
+        if (correction_ppm < -MAX_CORRECTION_PPM) correction_ppm = -MAX_CORRECTION_PPM;
+        step *= 1.0 + correction_ppm * 1e-6;
     }
 
     for (int i = 0; i < num_frames; i++){
@@ -409,22 +484,32 @@ void pcm_capture_read(float * stereo_out, int num_frames){
         float t = (float) resample_phase;
         stereo_out[2*i]   = resample_prev[0] + (resample_cur[0] - resample_prev[0]) * t;
         stereo_out[2*i+1] = resample_prev[1] + (resample_cur[1] - resample_prev[1]) * t;
-        resample_phase += resample_step;
+        resample_phase += step;
     }
 
     LeaveCriticalSection(&ring_lock);
 }
 
-void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t * buffered_ms, float * peak){
+void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t * buffered_ms, float * peak, int * drift_ppm){
     EnterCriticalSection(&ring_lock);
     *underruns = stat_underruns;
     *overruns = stat_overruns;
     *buffered_ms = device_rate ? ring_count * 1000 / device_rate : 0;
     *peak = stat_peak;
+    *drift_ppm = (int) correction_ppm;
     stat_underruns = 0;
     stat_overruns = 0;
     stat_peak = 0.0f;
     LeaveCriticalSection(&ring_lock);
+}
+
+void pcm_capture_test_init(uint32_t rate){
+    ring_reset();
+    device_rate = rate;
+}
+
+void pcm_capture_test_push(const float * stereo_frames, uint32_t num_frames){
+    ring_push(stereo_frames, num_frames);
 }
 
 bool pcm_capture_get_volume(float * level, bool * muted){

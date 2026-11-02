@@ -24,7 +24,7 @@ Windows playback → virtual audio device (VB-CABLE) → WASAPI loopback → lib
 - **The Bluetooth adapter is taken away from Windows.** ldac_bridge needs the adapter's driver replaced with WinUSB. While that driver is installed, Windows' own Bluetooth (mice, keyboards, game controllers, other headphones) does not work on that adapter. Use a second adapter if you need both. The change can be undone, see [Restore Windows Bluetooth](#restore-windows-bluetooth).
 - **Only one adapter has been tested so far.** See [Supported hardware](#supported-hardware).
 - **No microphone.** Only A2DP playback is implemented, so there is no headset microphone (HFP) for calls.
-- **Latency is about 100–200 ms.** It is fine for music; video may be slightly out of sync.
+- **Latency is roughly 150–200 ms**, most of it inside the headphones. It is fine for music; for video, use your player's audio delay setting (VLC, mpv, MPC-HC, PotPlayer).
 - **Non-commercial use only.** See [License](#license).
 
 ## Supported hardware
@@ -99,7 +99,7 @@ A2DP: connected to XX:XX:XX:XX:XX:XX, querying codecs...
 Selecting LDAC 48000 Hz stereo
 A2DP: LDAC configured, 48000 Hz
 A2DP: streaming LDAC. Play something on Windows. Ctrl-C to quit.
-[stats] HQ 990 kbps, 9xx kbps on air, ...
+[stats] HQ 990 kbps, 9xx kbps on air, 187 pkt/s, buffer 28/30 ms, drift +12 ppm, ...
 Battery: L 80% | R 79% | Case 67%
 ```
 
@@ -130,6 +130,7 @@ The tray UI is in Traditional Chinese when the Windows display language is Chine
 | Option | Description |
 |---|---|
 | `--quality hq\|sq\|mq\|abr` | 990 / 660 / 330 kbps, or adaptive starting at 990. Use `abr` or `sq` if the sound drops out |
+| `--latency 30` | Capture buffer in ms, 10–500 (default 30). Lower is less delay; raise it if the sound drops out while the computer is busy |
 | `--rate 96000` | LDAC sampling rate (default: same as the captured device, usually 48 kHz) |
 | `--device "CABLE Output"` | Device to capture (default: loopback of the default playback device) |
 | `--addr XX:XX:XX:XX:XX:XX` | Connect to this address |
@@ -148,7 +149,7 @@ The tray UI is in Traditional Chinese when the Windows display language is Chine
 
 - **`Intel firmware setup failed`**: the firmware for your adapter is missing from `firmware/`, or the adapter is not in its bootloader. Shut down fully and start the computer again.
 - **No sound but it says streaming**: check that the Windows output device is CABLE Input, and that the `peak` value in the `[stats]` line moves while sound is playing.
-- **Sound drops out**: try `--quality abr` or `--quality sq`, and keep the adapter's antenna away from USB 3 ports and cables.
+- **Sound drops out**: if `underruns` in the `[stats]` line goes up, raise `--latency` (e.g. 50). Otherwise try `--quality abr` or `--quality sq`, and keep the adapter's antenna away from USB 3 ports and cables.
 - **Bluetooth stops working after sleep**: `ldac_tray.exe` restarts automatically. `ldac_bridge.exe` alone exits, and you start it again.
 - **Packet logs**: `hci_dump.pklg` (and `hci_dump.prev.pklg` from the previous run) can be opened in Wireshark.
 - **After a Windows Update** the original driver may come back. Repeat step 3.
@@ -185,7 +186,7 @@ ldac_bridge/offline_test.exe               # should end with OK
 
 ## Known limitations
 
-- Clock drift between the audio device and Bluetooth is handled by dropping or inserting samples, which can cause a very short click every few minutes.
+- Clock drift between the audio device and Bluetooth is compensated by resampling up to ±0.2 % faster or slower (shown as `drift` in the `[stats]` line), which is inaudible.
 - Only Classic Bluetooth is used. LE Audio is not.
 - Windows only has a play/pause toggle, so if the headphones and the player get out of sync, press the button once more.
 
