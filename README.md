@@ -182,7 +182,11 @@ ldac_bridge/offline_test.exe               # should end with OK
 
 ### Changes to BTstack
 
-`patches/btstack-avrcp-passthrough-release.patch` fixes the AVRCP pass-through response so it echoes the button-release bit. Without it, some headphones (Sony WF-1000XM6) keep resending the release, and the buttons work only once. When updating BTstack in `setup.sh`, check whether this is fixed upstream.
+`patches/btstack-avrcp-passthrough-release.patch` fixes the AVRCP pass-through response so it echoes the button-release bit. Without it, some headphones (Sony WF-1000XM6) keep resending the release, and the buttons work only once.
+
+`patches/btstack-intel-stale-reply.patch` makes the Intel startup ignore a command reply left over from a previous run. Without it, a restart at the wrong moment (for example after sleep) leaves every reply off by one, and every later start fails with `Intel Controller uses new TLV mode` until the computer is fully shut down.
+
+When updating BTstack in `setup.sh`, check whether these are fixed upstream.
 
 ## Known limitations
 

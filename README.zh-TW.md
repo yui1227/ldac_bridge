@@ -182,7 +182,11 @@ ldac_bridge/offline_test.exe               # 最後一行應該是 OK
 
 ### 對 BTstack 的修改
 
-`patches/btstack-avrcp-passthrough-release.patch` 修正 AVRCP pass-through 回應，讓它原樣回傳按鍵「放開」的位元。少了這個修正，部分耳機（Sony WF-1000XM6）會不斷重送放開指令，按鍵只有第一次有效。更新 `setup.sh` 裡的 BTstack 版本時，要確認上游是否已修正。
+`patches/btstack-avrcp-passthrough-release.patch` 修正 AVRCP pass-through 回應，讓它原樣回傳按鍵「放開」的位元。少了這個修正，部分耳機（Sony WF-1000XM6）會不斷重送放開指令，按鍵只有第一次有效。
+
+`patches/btstack-intel-stale-reply.patch` 讓 Intel 初始化時忽略上一次執行遺留的指令回應。少了這個修正，在不對的時機重新啟動（例如睡眠喚醒後），之後每個回應都會錯開一個，每次啟動都會失敗並顯示 `Intel Controller uses new TLV mode`，直到完整關機為止。
+
+更新 `setup.sh` 裡的 BTstack 版本時，要確認上游是否已修正。
 
 ## 已知限制
 

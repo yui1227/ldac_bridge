@@ -9,7 +9,8 @@ built from them, together with the license texts in the `licenses/` folder.
 - Source: https://github.com/bluekitchen/btstack (pinned commit in `setup.sh`)
 - Copyright (C) 2009 BlueKitchen GmbH
 - License: BTstack license (BSD-style, **non-commercial use only**), see `licenses/BTSTACK_LICENSE.txt`
-- Modified: `patches/btstack-avrcp-passthrough-release.patch` (AVRCP pass-through release response)
+- Modified: `patches/btstack-avrcp-passthrough-release.patch` (AVRCP pass-through release response),
+  `patches/btstack-intel-stale-reply.patch` (ignore stale replies during Intel controller startup)
 
 Because ldac_bridge.exe statically links BTstack, the program may only be used,
 modified and redistributed for personal benefit, not for any commercial purpose or

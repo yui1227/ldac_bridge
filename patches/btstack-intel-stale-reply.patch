@@ -1,0 +1,29 @@
+--- a/chipset/intel/btstack_chipset_intel_firmware.c
++++ b/chipset/intel/btstack_chipset_intel_firmware.c
+@@ -288,12 +288,26 @@
+     return transport_send_intel_ddc(fw_buffer, 1 + len);
+ }
+ 
++// A previous run that stopped before reading its last reply (e.g. Read Version) leaves that
++// Command Complete queued in the controller. Without this check it is taken as the reply to
++// HCI Reset, every later reply is off by one, and the next run inherits the same problem.
++static bool is_stale_reply(uint8_t * packet, uint16_t size, uint16_t expected_opcode){
++    if (packet == NULL || packet[0] != 0x0e || size < 5) return false;
++    return little_endian_read_16(packet, 3) != expected_opcode;
++}
++
+ static void state_machine(uint8_t *packet, uint16_t size) {
+     size_t res;
+     size_t buffer_offset;
+     bd_addr_t addr;
+     char    fw_path[300];
+ 
++    if ((state == STATE_HANDLE_HCI_RESET      && is_stale_reply(packet, size, 0x0c03)) ||
++        (state == STATE_HANDLE_READ_VERSION_1 && is_stale_reply(packet, size, 0xfc05))){
++        log_info("ignoring stale reply for opcode 0x%04x", little_endian_read_16(packet, 3));
++        return;
++    }
++
+     if (packet){
+         // firmware upload complete event?
+         if (packet[0] == 0xff && packet[2] == 0x06) {
