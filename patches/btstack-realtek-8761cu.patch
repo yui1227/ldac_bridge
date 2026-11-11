@@ -1,0 +1,26 @@
+--- a/chipset/realtek/btstack_chipset_realtek.c
++++ b/chipset/realtek/btstack_chipset_realtek.c
+@@ -295,6 +295,8 @@
+     {0xc03f, 0x8822, "mp_rtl8822cu_fw", "rtl8822cu_fw", "rtl8822cu_config", NULL, 0, RTL8822CU}, /* RTL8822CE-VS */
+ 
+     {0x8771, 0x8761, "mp_rtl8761b_fw", "rtl8761bu_fw", "rtl8761bu_config", NULL, 0, RTL8761BU}, /* RTL8761BU only */
++    /* RTL8761CU (e.g. ASUS USB-BT540): ROM patch in the classic epatch format, linux-firmware rtl_bt/ */
++    {0x1D70, 0x8761, "mp_rtl8761c_fw", "rtl8761cu_fw.bin", "rtl8761cu_config.bin", NULL, 0, RTL8761BU}, /* ASUS USB-BT540 */
+     {0xa725, 0x8761, "mp_rtl8761b_fw", "rtl8725au_fw", "rtl8725au_config", NULL, 0, RTL8761BU}, /* RTL8725AU */
+     {0xa72A, 0x8761, "mp_rtl8761b_fw", "rtl8725au_fw", "rtl8725au_config", NULL, 0, RTL8761BU}, /* RTL8725AU BT only */
+ 
+@@ -1179,6 +1181,14 @@
+                 state = STATE_PHASE_2_READ_SEC_PROJ;
+                 break;
+             case STATE_PHASE_2_READ_SEC_PROJ:
++                // The RTL8761CU ROM stops responding and drops off USB on this register read.
++                // The key id only selects a patch in the new (RTBTCore) firmware format, which
++                // 8761 firmware does not use, so skip the read there.
++                if (rtb_cfg.lmp_subversion == ROM_LMP_8761a) {
++                    g_key_id = 0;
++                    chipset_prepare_download();
++                    continue;
++                }
+                 memcpy(hci_cmd_buffer, hci_realtek_read_sec_proj, sizeof(hci_realtek_read_sec_proj));
+                 state = STATE_PHASE_2_W4_SEC_PROJ;
+                 break;

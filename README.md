@@ -31,13 +31,16 @@ Windows playback → virtual audio device (VB-CABLE) → WASAPI loopback → lib
 
 ### Bluetooth adapter
 
-The adapter must be supported by BTstack's Windows WinUSB port, and Intel adapters also need their firmware loaded by ldac_bridge.
+The adapter must be supported by BTstack's Windows WinUSB port. Intel and Realtek adapters also need firmware, which ldac_bridge loads at startup. A USB dongle is often the better choice: the built-in adapter stays with Windows, and the dongle does not share an antenna with Wi-Fi.
 
 | Adapter | USB ID | Status |
 |---|---|---|
 | Intel ThunderPeak, e.g. Wireless-AC 9260 (firmware `ibt-18-16-1`) | `8087:0025` | ✅ Tested |
 | Other Intel adapters | `8087:xxxx` | ❓ Need a different firmware file. Not supported yet |
-| Realtek, Broadcom, CSR, MediaTek | – | ❓ Not supported yet |
+| ASUS USB-BT540 (Realtek RTL8761CU, firmware `rtl8761cu_fw`) | `0B05:1D70` | ✅ Tested |
+| Other Realtek dongles | `0BDA:xxxx` | ❓ BTstack knows many Realtek chips, but setup.sh only downloads the RTL8761CU firmware. Not tested |
+| Broadcom, CSR (no firmware needed) | – | ❓ May work, not tested |
+| MediaTek | – | ❌ Not supported |
 
 Many desktop motherboards and laptops have an Intel Bluetooth adapter built in. To find yours, open Device Manager → Bluetooth → your adapter → Properties → Details → Hardware Ids, and look for `VID_8087&PID_xxxx`.
 
@@ -74,7 +77,7 @@ ldac_bridge records the default playback device, so the volume slider and media 
 
 1. Download and run [Zadig](https://zadig.akeo.ie).
 2. Choose **Options → List All Devices**.
-3. Select your Bluetooth adapter, for example **Intel(R) Wireless Bluetooth(R)**. **Check that the USB ID matches the adapter you found above.** Choosing the wrong device can disable your keyboard, mouse or another USB device.
+3. Select your Bluetooth adapter, for example **Intel(R) Wireless Bluetooth(R)** or, for a dongle, **ASUS Bluetooth USB Adapter**. **Check that the USB ID matches the adapter you found above.** Choosing the wrong device can disable your keyboard, mouse or another USB device.
 4. Select **WinUSB** as the target driver and click **Replace Driver**.
 5. Shut down and start the computer again, so the adapter starts from its bootloader.
 
@@ -153,6 +156,8 @@ The tray UI is in Traditional Chinese when the Windows display language is Chine
 
 ## Troubleshooting
 
+- **`No Bluetooth adapter uses the WinUSB driver`**: repeat step 3. If several adapters use WinUSB, the first one found is used; give the others back to Windows.
+- **`Bluetooth controller did not finish setup`**: the adapter stopped answering during setup. Unplug and replug a dongle, or shut down fully for a built-in adapter.
 - **`Intel firmware setup failed`**: the firmware for your adapter is missing from `firmware/`, or the adapter is not in its bootloader. Shut down fully and start the computer again.
 - **No sound but it says streaming**: check that the Windows output device is CABLE Input, and that the `peak` value in the `[stats]` line moves while sound is playing.
 - **Sound drops out, or `LDAC ABR: link congested` in the log**: the radio cannot send the bitrate. If `kbps on air` in the `[stats]` line stays below the target, the link is the problem:
@@ -194,6 +199,8 @@ ldac_bridge/offline_test.exe               # should end with OK
 `patches/btstack-avrcp-passthrough-release.patch` fixes the AVRCP pass-through response so it echoes the button-release bit. Without it, some headphones (Sony WF-1000XM6) keep resending the release, and the buttons work only once.
 
 `patches/btstack-intel-stale-reply.patch` makes the Intel startup ignore a command reply left over from a previous run. Without it, a restart at the wrong moment (for example after sleep) leaves every reply off by one, and every later start fails with `Intel Controller uses new TLV mode` until the computer is fully shut down.
+
+`patches/btstack-realtek-8761cu.patch` adds the RTL8761CU (ASUS USB-BT540) to BTstack's Realtek USB table, and skips a register read that makes its ROM drop off USB.
 
 When updating BTstack in `setup.sh`, check whether these are fixed upstream.
 

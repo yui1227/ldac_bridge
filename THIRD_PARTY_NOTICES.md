@@ -10,7 +10,8 @@ built from them, together with the license texts in the `licenses/` folder.
 - Copyright (C) 2009 BlueKitchen GmbH
 - License: BTstack license (BSD-style, **non-commercial use only**), see `licenses/BTSTACK_LICENSE.txt`
 - Modified: `patches/btstack-avrcp-passthrough-release.patch` (AVRCP pass-through release response),
-  `patches/btstack-intel-stale-reply.patch` (ignore stale replies during Intel controller startup)
+  `patches/btstack-intel-stale-reply.patch` (ignore stale replies during Intel controller startup),
+  `patches/btstack-realtek-8761cu.patch` (RTL8761CU support)
 
 Because ldac_bridge.exe statically links BTstack, the program may only be used,
 modified and redistributed for personal benefit, not for any commercial purpose or
@@ -31,6 +32,12 @@ not certified or endorsed by Sony.
 - Source: https://gitlab.com/kernel-firmware/linux-firmware (`intel/ibt-*.sfi`, `intel/ibt-*.ddc`)
 - Copyright © 2014, Intel Corporation
 - License: redistributable in unmodified binary form, see `firmware/LICENCE.ibt_firmware`
+
+## Realtek Bluetooth firmware
+
+- Source: https://gitlab.com/kernel-firmware/linux-firmware (`rtl_bt/rtl8761cu_fw.bin`, `rtl_bt/rtl8761cu_config.bin`)
+- Copyright (c) 2010, Realtek Semiconductor Corporation
+- License: redistributable in unmodified binary form, see `firmware/LICENCE.rtlwifi_firmware.txt`
 
 ## Protocol references
 

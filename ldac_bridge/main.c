@@ -7,11 +7,13 @@
 #include <string.h>
 
 #include <windows.h>
+#include <setupapi.h>
 #include <timeapi.h>
 
 #include "btstack_config.h"
 
 #include "btstack_chipset_intel_firmware.h"
+#include "btstack_chipset_realtek.h"
 #include "btstack_debug.h"
 #include "btstack_event.h"
 #include "btstack_memory.h"
@@ -60,6 +62,11 @@ static char firmware_dir[MAX_PATH];
 // Set by ldac_tray.exe to request a clean shutdown
 #define QUIT_EVENT_NAME "Local\\ldac_bridge_quit"
 
+// Controller setup (firmware download, HCI init) normally takes a few seconds. A controller
+// that stops answering during setup would otherwise leave us waiting forever.
+#define INIT_TIMEOUT_MS         30000
+
+static btstack_timer_source_t init_timer;
 static btstack_timer_source_t heartbeat_timer;
 static uint32_t heartbeat_last_event_ms;
 static btstack_context_callback_registration_t quit_callback;
@@ -78,6 +85,13 @@ static void heartbeat_handler(btstack_timer_source_t * ts){
     btstack_run_loop_add_timer(ts);
 }
 
+static void init_timeout_handler(btstack_timer_source_t * ts){
+    UNUSED(ts);
+    printf("Bluetooth controller did not finish setup within %u s, exiting\n", (unsigned)(INIT_TIMEOUT_MS / 1000));
+    printf("@event fatal controller setup timeout\n");
+    exit(EXIT_CODE_CONTROLLER_LOST);
+}
+
 static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size){
     UNUSED(channel);
     UNUSED(size);
@@ -86,6 +100,7 @@ static void packet_handler (uint8_t packet_type, uint16_t channel, uint8_t *pack
     if (hci_event_packet_get_type(packet) != BTSTACK_EVENT_STATE) return;
     switch (btstack_event_state_get_state(packet)){
         case HCI_STATE_WORKING:
+            btstack_run_loop_remove_timer(&init_timer);
             btstack_run_loop_set_timer_handler(&heartbeat_timer, &heartbeat_handler);
             btstack_run_loop_set_timer(&heartbeat_timer, HEARTBEAT_INTERVAL_MS);
             btstack_run_loop_add_timer(&heartbeat_timer);
@@ -130,6 +145,106 @@ static DWORD WINAPI quit_event_thread(LPVOID arg){
     return 0;
 }
 
+// ---- Bluetooth adapter selection ----
+//
+// BTstack's WinUSB transport opens the first USB device it can open with WinUSB. Find that
+// device ourselves to know which chip it is: Intel needs its firmware loaded before HCI
+// starts, Realtek gets its ROM patch during HCI init, other chips (e.g. CSR) need nothing.
+
+typedef enum { ADAPTER_NONE, ADAPTER_INTEL, ADAPTER_REALTEK, ADAPTER_GENERIC } adapter_type_t;
+
+#define USB_VENDOR_ID_INTEL     0x8087
+#define USB_VENDOR_ID_REALTEK   0x0bda
+
+static const GUID GUID_DEVINTERFACE_USB_DEVICE_ = {0xA5DCBF10, 0x6530, 0x11D2, {0x90, 0x1F, 0x00, 0xC0, 0x4F, 0xB9, 0x51, 0xED}};
+
+// Realtek chips sold under another vendor ID (product ID must be in BTstack's Realtek table)
+static const uint16_t realtek_rebranded[][2] = {
+    { 0x0b05, 0x1d70 },     // ASUS USB-BT540 (RTL8761CU)
+};
+
+static adapter_type_t adapter_type;
+static uint16_t       adapter_vendor_id;
+static uint16_t       adapter_product_id;
+
+static const char * adapter_type_name(adapter_type_t type){
+    switch (type){
+        case ADAPTER_INTEL:   return "Intel";
+        case ADAPTER_REALTEK: return "Realtek";
+        default:              return "generic";
+    }
+}
+
+static adapter_type_t classify_adapter(uint16_t vendor_id, uint16_t product_id){
+    if (vendor_id == USB_VENDOR_ID_INTEL) return ADAPTER_INTEL;
+    if (vendor_id == USB_VENDOR_ID_REALTEK) return ADAPTER_REALTEK;
+    for (size_t i = 0; i < sizeof(realtek_rebranded) / sizeof(realtek_rebranded[0]); i++){
+        if (realtek_rebranded[i][0] == vendor_id && realtek_rebranded[i][1] == product_id) return ADAPTER_REALTEK;
+    }
+    return ADAPTER_GENERIC;
+}
+
+// true if any string of a REG_MULTI_SZ list contains needle
+static bool multi_sz_contains(const char * list, const char * needle){
+    for (const char * s = list; *s; s += strlen(s) + 1){
+        if (strstr(s, needle)) return true;
+    }
+    return false;
+}
+
+static void find_bluetooth_adapter(void){
+    HDEVINFO set = SetupDiGetClassDevsA(&GUID_DEVINTERFACE_USB_DEVICE_, NULL, NULL, DIGCF_DEVICEINTERFACE | DIGCF_PRESENT);
+    if (set == INVALID_HANDLE_VALUE) return;
+    int found = 0;
+    SP_DEVINFO_DATA info;
+    info.cbSize = sizeof(info);
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &info); i++){
+        char service[64] = {0};
+        char hardware_ids[512] = {0};
+        char compatible_ids[1024] = {0};
+        if (!SetupDiGetDeviceRegistryPropertyA(set, &info, SPDRP_SERVICE, NULL, (BYTE *) service, sizeof(service) - 1, NULL)) continue;
+        if (_stricmp(service, "WinUSB") != 0) continue;
+        SetupDiGetDeviceRegistryPropertyA(set, &info, SPDRP_HARDWAREID, NULL, (BYTE *) hardware_ids, sizeof(hardware_ids) - 2, NULL);
+        SetupDiGetDeviceRegistryPropertyA(set, &info, SPDRP_COMPATIBLEIDS, NULL, (BYTE *) compatible_ids, sizeof(compatible_ids) - 2, NULL);
+        unsigned vendor_id = 0, product_id = 0;
+        const char * vid = strstr(hardware_ids, "VID_");
+        const char * pid = strstr(hardware_ids, "PID_");
+        if (!vid || !pid || sscanf(vid + 4, "%4x", &vendor_id) != 1 || sscanf(pid + 4, "%4x", &product_id) != 1) continue;
+        adapter_type_t type = classify_adapter((uint16_t) vendor_id, (uint16_t) product_id);
+        // USB class E0 = wireless controller (Bluetooth)
+        if (type == ADAPTER_GENERIC && !multi_sz_contains(compatible_ids, "Class_E0")) continue;
+        printf("Bluetooth adapter on WinUSB: %04X:%04X (%s)\n", vendor_id, product_id, adapter_type_name(type));
+        if (found++ == 0){
+            adapter_type = type;
+            adapter_vendor_id = (uint16_t) vendor_id;
+            adapter_product_id = (uint16_t) product_id;
+        }
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    if (found > 1){
+        printf("Warning: %d Bluetooth adapters use WinUSB, the first one is used. Give the others back to Windows.\n", found);
+    }
+}
+
+static void start_stack(void){
+    hci_init(transport, NULL);
+
+    if (adapter_type == ADAPTER_REALTEK){
+        // ROM patch rtl*_fw.bin / rtl*_config.bin from the firmware folder, downloaded during HCI init
+        btstack_chipset_realtek_set_firmware_folder_path(firmware_dir);
+        btstack_chipset_realtek_set_config_folder_path(firmware_dir);
+        btstack_chipset_realtek_set_product_id(adapter_product_id);
+        hci_set_chipset(btstack_chipset_realtek_instance());
+        // phase 1 (identify chip) runs before HCI Reset, phase 2 (ROM version, patch download) after it
+        hci_enable_custom_pre_init();
+    }
+
+    hci_event_callback_registration.callback = &packet_handler;
+    hci_add_event_handler(&hci_event_callback_registration);
+
+    btstack_main(main_argc, main_argv);
+}
+
 static void intel_firmware_done(int result){
     if (result != 0){
         printf("Intel firmware setup failed (%d). Check that %s contains the matching ibt-*.sfi/.ddc files.\n",
@@ -137,13 +252,7 @@ static void intel_firmware_done(int result){
         exit(result);
     }
     printf("Intel controller ready.\n");
-
-    hci_init(transport, NULL);
-
-    hci_event_callback_registration.callback = &packet_handler;
-    hci_add_event_handler(&hci_event_callback_registration);
-
-    btstack_main(main_argc, main_argv);
+    start_stack();
 }
 
 int main(int argc, const char * argv[]){
@@ -195,9 +304,25 @@ int main(int argc, const char * argv[]){
         CreateThread(NULL, 0, quit_event_thread, quit_event, 0, NULL);
     }
 
+    btstack_run_loop_set_timer_handler(&init_timer, &init_timeout_handler);
+    btstack_run_loop_set_timer(&init_timer, INIT_TIMEOUT_MS);
+    btstack_run_loop_add_timer(&init_timer);
+
     transport = hci_transport_usb_instance();
-    btstack_chipset_intel_set_firmware_path(firmware_dir);
-    btstack_chipset_intel_download_firmware(transport, &intel_firmware_done);
+    find_bluetooth_adapter();
+    switch (adapter_type){
+        case ADAPTER_NONE:
+            printf("No Bluetooth adapter uses the WinUSB driver. Assign WinUSB to your adapter with Zadig (see README).\n");
+            timeEndPeriod(1);
+            return 1;
+        case ADAPTER_INTEL:
+            btstack_chipset_intel_set_firmware_path(firmware_dir);
+            btstack_chipset_intel_download_firmware(transport, &intel_firmware_done);
+            break;
+        default:
+            start_stack();
+            break;
+    }
 
     btstack_run_loop_execute();
     return 0;

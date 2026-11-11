@@ -13,6 +13,7 @@ CFLAGS  = -O2 -g -Wall -Wno-unused-function -Wno-format-truncation \
           -I$(BTSTACK)/platform/posix \
           -I$(BTSTACK)/platform/embedded \
           -I$(BTSTACK)/chipset/intel \
+          -I$(BTSTACK)/chipset/realtek \
           -I$(BTSTACK)/3rd-party/bluedroid/encoder/include \
           -I$(BTSTACK)/3rd-party/bluedroid/decoder/include \
           -I$(BTSTACK)/3rd-party/yxml \
@@ -25,6 +26,7 @@ SRC_BTSTACK  = $(filter-out %lc3_google.c %lc3plus_fraunhofer.c,$(wildcard $(BTS
                $(wildcard $(BTSTACK)/src/classic/*.c) \
                $(filter-out %hci_dump_windows_stdout.c,$(wildcard $(BTSTACK)/platform/windows/*.c)) \
                $(wildcard $(BTSTACK)/chipset/intel/*.c) \
+               $(BTSTACK)/chipset/realtek/btstack_chipset_realtek.c \
                $(wildcard $(BTSTACK)/3rd-party/bluedroid/encoder/srce/*.c) \
                $(wildcard $(BTSTACK)/3rd-party/bluedroid/decoder/srce/*.c) \
                $(BTSTACK)/3rd-party/yxml/yxml.c $(BTSTACK)/3rd-party/md5/md5.c

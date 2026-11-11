@@ -31,13 +31,16 @@ Windows 播放 → 虛擬音效卡 (VB-CABLE) → WASAPI 擷取 → libldac 編�
 
 ### 藍牙控制器
 
-控制器必須被 BTstack 的 Windows WinUSB port 支援。Intel 的控制器還需要由 ldac_bridge 載入韌體。
+控制器必須被 BTstack 的 Windows WinUSB port 支援。Intel 和 Realtek 的控制器還需要韌體，由 ldac_bridge 啟動時載入。通常用一支 USB 藍牙 dongle 比較好：內建藍牙可以留給 Windows，dongle 也不會和 Wi-Fi 共用天線。
 
 | 控制器 | USB ID | 狀態 |
 |---|---|---|
 | Intel ThunderPeak，例如 Wireless-AC 9260（韌體 `ibt-18-16-1`） | `8087:0025` | ✅ 已測試 |
 | 其他 Intel 控制器 | `8087:xxxx` | ❓ 需要不同的韌體檔，目前尚未支援 |
-| Realtek、Broadcom、CSR、MediaTek | – | ❓ 目前尚未支援 |
+| ASUS USB-BT540（Realtek RTL8761CU，韌體 `rtl8761cu_fw`） | `0B05:1D70` | ✅ 已測試 |
+| 其他 Realtek dongle | `0BDA:xxxx` | ❓ BTstack 認得很多 Realtek 晶片，但 setup.sh 只下載 RTL8761CU 的韌體，未測試 |
+| Broadcom、CSR（不需要韌體） | – | ❓ 可能可以用，未測試 |
+| MediaTek | – | ❌ 不支援 |
 
 很多桌機主機板和筆電內建的都是 Intel 藍牙。查看方式：裝置管理員 → 藍牙 → 你的控制器 → 內容 → 詳細資料 → 硬體識別碼，找 `VID_8087&PID_xxxx`。
 
@@ -74,7 +77,7 @@ ldac_bridge 擷取的是預設播放裝置，所以音量滑桿和鍵盤音量�
 
 1. 下載並執行 [Zadig](https://zadig.akeo.ie)。
 2. 選單 **Options → List All Devices**。
-3. 選你的藍牙控制器，例如 **Intel(R) Wireless Bluetooth(R)**。**一定要確認 USB ID 和上面查到的相同**，選錯可能會讓鍵盤、滑鼠或其他 USB 裝置失效。
+3. 選你的藍牙控制器，例如 **Intel(R) Wireless Bluetooth(R)**，或 dongle 的 **ASUS Bluetooth USB Adapter**。**一定要確認 USB ID 和上面查到的相同**，選錯可能會讓鍵盤、滑鼠或其他 USB 裝置失效。
 4. 右側驅動選 **WinUSB**，按 **Replace Driver**。
 5. 關機再開機，讓控制器回到 bootloader 狀態。
 
@@ -153,6 +156,8 @@ Windows 顯示語言是中文時，系統匣介面為繁體中文，其他語言
 
 ## 疑難排解
 
+- **`No Bluetooth adapter uses the WinUSB driver`**：重做第 3 步。如果有好幾個控制器都用 WinUSB，程式會用找到的第一個，其他的請還給 Windows。
+- **`Bluetooth controller did not finish setup`**：控制器在初始化途中沒有回應。dongle 就拔掉再插回去；內建藍牙則完整關機再開機。
 - **`Intel firmware setup failed`**：`firmware/` 裡沒有你的控制器對應的韌體，或控制器不在 bootloader 狀態。請完整關機再開機。
 - **顯示串流中但沒聲音**：確認 Windows 的輸出裝置是 CABLE Input，且播放時 `[stats]` 那行的 `peak` 有在變動。
 - **斷音，或 log 出現 `LDAC ABR: link congested`**：無線電送不完這個位元率。如果 `[stats]` 那行的 `kbps on air` 一直低於目標，問題就在連線：
@@ -194,6 +199,8 @@ ldac_bridge/offline_test.exe               # 最後一行應該是 OK
 `patches/btstack-avrcp-passthrough-release.patch` 修正 AVRCP pass-through 回應，讓它原樣回傳按鍵「放開」的位元。少了這個修正，部分耳機（Sony WF-1000XM6）會不斷重送放開指令，按鍵只有第一次有效。
 
 `patches/btstack-intel-stale-reply.patch` 讓 Intel 初始化時忽略上一次執行遺留的指令回應。少了這個修正，在不對的時機重新啟動（例如睡眠喚醒後），之後每個回應都會錯開一個，每次啟動都會失敗並顯示 `Intel Controller uses new TLV mode`，直到完整關機為止。
+
+`patches/btstack-realtek-8761cu.patch` 把 RTL8761CU（ASUS USB-BT540）加進 BTstack 的 Realtek USB 清單，並跳過一個會讓它的 ROM 從 USB 掉線的暫存器讀取。
 
 更新 `setup.sh` 裡的 BTstack 版本時，要確認上游是否已修正。
 

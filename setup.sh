@@ -1,14 +1,23 @@
 #!/bin/sh
-# Fetch pinned third-party sources and Intel firmware, apply local patches.
+# Fetch pinned third-party sources and Bluetooth firmware, apply local patches.
 # Run once after cloning (Git Bash / MSYS2):  sh setup.sh
 set -e
 cd "$(dirname "$0")"
 
 BTSTACK_COMMIT=0f4dd2ac1240a503edc4ec7750a32704f85448fc
 LIBLDAC_COMMIT=eeee1a3f5f8df1282e3a6d297085885fd886737b
-FIRMWARE_URL=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/intel
-FIRMWARE_FILES="ibt-18-16-1.sfi ibt-18-16-1.ddc"   # Intel ThunderPeak (USB 8087:0025)
-FIRMWARE_LICENSE_URL=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/LICENSES/LICENCE.ibt_firmware
+LINUX_FIRMWARE_URL=https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main
+# path in linux-firmware, all saved flat into ldac_bridge/firmware/
+FIRMWARE_FILES="
+    intel/ibt-18-16-1.sfi
+    intel/ibt-18-16-1.ddc
+    LICENSES/LICENCE.ibt_firmware
+    rtl_bt/rtl8761cu_fw.bin
+    rtl_bt/rtl8761cu_config.bin
+    LICENSES/LICENCE.rtlwifi_firmware.txt
+"
+# intel/ibt-18-16-1:  Intel ThunderPeak (USB 8087:0025)
+# rtl_bt/rtl8761cu:   Realtek RTL8761CU, e.g. ASUS USB-BT540 (USB 0B05:1D70)
 
 mkdir -p third_party
 
@@ -32,14 +41,11 @@ fi
 
 mkdir -p ldac_bridge/firmware
 for f in $FIRMWARE_FILES; do
-    if [ ! -f "ldac_bridge/firmware/$f" ]; then
-        echo "Downloading firmware $f..."
-        curl -sSfL -o "ldac_bridge/firmware/$f" "$FIRMWARE_URL/$f"
+    name=$(basename "$f")
+    if [ ! -f "ldac_bridge/firmware/$name" ]; then
+        echo "Downloading firmware $name..."
+        curl -sSfL -o "ldac_bridge/firmware/$name" "$LINUX_FIRMWARE_URL/$f"
     fi
 done
-
-if [ ! -f ldac_bridge/firmware/LICENCE.ibt_firmware ]; then
-    curl -sSfL -o ldac_bridge/firmware/LICENCE.ibt_firmware "$FIRMWARE_LICENSE_URL"
-fi
 
 echo "Done. Build with: sh ldac_bridge/build.sh"
