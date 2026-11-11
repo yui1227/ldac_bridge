@@ -12,7 +12,7 @@ Windows playback → virtual audio device (VB-CABLE) → WASAPI loopback → lib
 
 ## Features
 
-- LDAC at 44.1 / 48 / 88.2 / 96 kHz, 990 / 660 / 330 kbps, plus a simple adaptive bitrate mode
+- LDAC at 44.1 / 48 / 88.2 / 96 kHz, 990 / 660 / 330 kbps. By default the bitrate adapts to the link, like on Android
 - Headphone buttons (play/pause, next, previous) become Windows media keys
 - Two-way volume sync between Windows and the headphones (AVRCP absolute volume)
 - Left / right / case battery levels on Sony headphones
@@ -121,6 +121,12 @@ ldac_tray.exe --install     # turn on
 ldac_tray.exe --uninstall   # turn off
 ```
 
+Any other options are passed on to `ldac_bridge.exe`. Given together with `--install`, they are also used on every autostart:
+
+```bash
+ldac_tray.exe --install --quality hq --latency 50
+```
+
 Do not run `ldac_bridge.exe` by hand while `ldac_tray.exe` is running. Both would try to use the same adapter.
 
 The tray UI is in Traditional Chinese when the Windows display language is Chinese, and in English otherwise.
@@ -129,7 +135,7 @@ The tray UI is in Traditional Chinese when the Windows display language is Chine
 
 | Option | Description |
 |---|---|
-| `--quality hq\|sq\|mq\|abr` | 990 / 660 / 330 kbps, or adaptive starting at 990. Use `abr` or `sq` if the sound drops out |
+| `--quality hq\|sq\|mq\|abr` | Fixed 990 / 660 / 330 kbps, or adaptive (default): starts at 990 and steps down to 330 when the link is congested, back up when it recovers |
 | `--latency 30` | Capture buffer in ms, 10–500 (default 30). Lower is less delay; raise it if the sound drops out while the computer is busy |
 | `--rate 96000` | LDAC sampling rate (default: same as the captured device, usually 48 kHz) |
 | `--device "CABLE Output"` | Device to capture (default: loopback of the default playback device) |
@@ -149,7 +155,10 @@ The tray UI is in Traditional Chinese when the Windows display language is Chine
 
 - **`Intel firmware setup failed`**: the firmware for your adapter is missing from `firmware/`, or the adapter is not in its bootloader. Shut down fully and start the computer again.
 - **No sound but it says streaming**: check that the Windows output device is CABLE Input, and that the `peak` value in the `[stats]` line moves while sound is playing.
-- **Sound drops out**: if `underruns` in the `[stats]` line goes up, raise `--latency` (e.g. 50). Otherwise try `--quality abr` or `--quality sq`, and keep the adapter's antenna away from USB 3 ports and cables.
+- **Sound drops out, or `LDAC ABR: link congested` in the log**: the radio cannot send the bitrate. If `kbps on air` in the `[stats]` line stays below the target, the link is the problem:
+  - Many Intel adapters are combined Wi-Fi + Bluetooth cards that share one antenna. When Wi-Fi uses the **2.4 GHz** band, the two take turns and Bluetooth gets much less airtime. Connect Wi-Fi to 5 GHz, or use Ethernet.
+  - Keep the antenna away from USB 3 ports and cables, and check whether the headphones are also connected to a phone (multipoint).
+  - If `kbps on air` is fine but `underruns` goes up, the computer is too busy: raise `--latency` (e.g. 50).
 - **Bluetooth stops working after sleep**: `ldac_tray.exe` restarts automatically. `ldac_bridge.exe` alone exits, and you start it again.
 - **Packet logs**: `hci_dump.pklg` (and `hci_dump.prev.pklg` from the previous run) can be opened in Wireshark.
 - **After a Windows Update** the original driver may come back. Repeat step 3.

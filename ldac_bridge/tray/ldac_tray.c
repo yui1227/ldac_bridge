@@ -4,6 +4,8 @@
 // - tray icon with connection state and battery in the tooltip
 // - Windows notification when the headset connects, with battery levels
 // - ldac_tray.exe --install / --uninstall: start at logon (HKCU Run key)
+// - any other options (e.g. --quality hq --latency 50) are passed to ldac_bridge.exe,
+//   and --install stores them for autostart
 //
 // ldac_bridge.exe reports state as "@event ..." lines on stdout; everything is also
 // written to ldac_bridge.log next to the executables.
@@ -22,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <wctype.h>
 
 #define APP_NAME            L"LDAC Bridge"
 #define RUN_KEY             L"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
@@ -89,6 +92,7 @@ static void select_language(void){
 static wchar_t exe_dir[MAX_PATH];
 static wchar_t bridge_path[MAX_PATH];
 static wchar_t log_path[MAX_PATH];
+static wchar_t bridge_args[512];   // our command line minus --install/--uninstall, passed to ldac_bridge.exe
 
 static HWND            hwnd;
 static NOTIFYICONDATAW tray;
@@ -264,8 +268,8 @@ static void start_child(void){
     si.hStdError = write_end;
     si.hStdInput = NULL;
     PROCESS_INFORMATION pi;
-    wchar_t cmdline[MAX_PATH + 4];
-    swprintf(cmdline, MAX_PATH + 4, L"\"%ls\"", bridge_path);
+    wchar_t cmdline[MAX_PATH + 600];
+    swprintf(cmdline, MAX_PATH + 600, L"\"%ls\" %ls", bridge_path, bridge_args);
     BOOL ok = CreateProcessW(bridge_path, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, exe_dir, &si, &pi);
     CloseHandle(write_end);
     if (!ok){
@@ -407,6 +411,30 @@ static LRESULT CALLBACK window_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp){
     }
 }
 
+// ---- command line ----
+
+// Remove a whole-word flag from a command line, returns true if it was present
+static bool take_flag(wchar_t * line, const wchar_t * flag){
+    size_t n = wcslen(flag);
+    for (wchar_t * p = wcsstr(line, flag); p; p = wcsstr(p + 1, flag)){
+        bool starts = (p == line) || iswspace(p[-1]);
+        bool ends = p[n] == 0 || iswspace(p[n]);
+        if (starts && ends){
+            wmemmove(p, p + n, wcslen(p + n) + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void trim(wchar_t * s){
+    wchar_t * start = s;
+    while (iswspace(*start)) start++;
+    wmemmove(s, start, wcslen(start) + 1);
+    size_t len = wcslen(s);
+    while (len > 0 && iswspace(s[len - 1])) s[--len] = 0;
+}
+
 // ---- autostart ----
 
 static int install_autostart(bool install){
@@ -417,9 +445,11 @@ static int install_autostart(bool install){
     }
     LONG result;
     if (install){
-        wchar_t self[MAX_PATH], value[MAX_PATH + 4];
+        // options given with --install (e.g. --quality hq) are used on every autostart
+        wchar_t self[MAX_PATH], value[MAX_PATH + 600];
         GetModuleFileNameW(NULL, self, MAX_PATH);
-        swprintf(value, MAX_PATH + 4, L"\"%ls\"", self);
+        if (bridge_args[0]) swprintf(value, MAX_PATH + 600, L"\"%ls\" %ls", self, bridge_args);
+        else swprintf(value, MAX_PATH + 600, L"\"%ls\"", self);
         result = RegSetValueExW(key, APP_NAME, 0, REG_SZ, (const BYTE *) value, (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
     } else {
         result = RegDeleteValueW(key, APP_NAME);
@@ -438,8 +468,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, PWSTR cmd, int show){
     select_language();
     wcscpy(status_text, T(S_STARTING));
 
-    if (wcsstr(cmd, L"--install"))   return install_autostart(true);
-    if (wcsstr(cmd, L"--uninstall")) return install_autostart(false);
+    // everything else on our command line is passed on to ldac_bridge.exe
+    wcsncpy(bridge_args, cmd, sizeof(bridge_args) / sizeof(wchar_t) - 1);
+    bool install = take_flag(bridge_args, L"--install");
+    bool uninstall = take_flag(bridge_args, L"--uninstall");
+    trim(bridge_args);
+    if (install)   return install_autostart(true);
+    if (uninstall) return install_autostart(false);
 
     CreateMutexW(NULL, TRUE, INSTANCE_MUTEX);
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;

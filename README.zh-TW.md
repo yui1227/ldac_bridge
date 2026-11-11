@@ -12,7 +12,7 @@ Windows 播放 → 虛擬音效卡 (VB-CABLE) → WASAPI 擷取 → libldac 編�
 
 ## 功能
 
-- LDAC 44.1 / 48 / 88.2 / 96 kHz、990 / 660 / 330 kbps，以及簡易自適應位元率
+- LDAC 44.1 / 48 / 88.2 / 96 kHz、990 / 660 / 330 kbps，預設會依連線狀況自動調整位元率（和 Android 一樣）
 - 耳機按鍵（播放/暫停、下一首、上一首）轉成 Windows 媒體鍵
 - Windows 和耳機的音量雙向同步（AVRCP 絕對音量）
 - Sony 耳機可顯示左耳、右耳、充電盒電量
@@ -121,6 +121,12 @@ ldac_tray.exe --install     # 開啟
 ldac_tray.exe --uninstall   # 關閉
 ```
 
+其他參數會轉給 `ldac_bridge.exe`。和 `--install` 一起給的話，之後每次自動啟動也會沿用：
+
+```bash
+ldac_tray.exe --install --quality hq --latency 50
+```
+
 `ldac_tray.exe` 執行時，不要再另外手動執行 `ldac_bridge.exe`，兩個程式會搶同一個控制器。
 
 Windows 顯示語言是中文時，系統匣介面為繁體中文，其他語言則為英文。
@@ -129,7 +135,7 @@ Windows 顯示語言是中文時，系統匣介面為繁體中文，其他語言
 
 | 參數 | 說明 |
 |---|---|
-| `--quality hq\|sq\|mq\|abr` | 990 / 660 / 330 kbps，或從 990 起跳的自適應。斷音時改用 `abr` 或 `sq` |
+| `--quality hq\|sq\|mq\|abr` | 固定 990 / 660 / 330 kbps，或自適應（預設）：從 990 起跳，連線壅塞時逐步降到 330，恢復後再調回來 |
 | `--latency 30` | 擷取緩衝，單位 ms，範圍 10～500（預設 30）。越低延遲越小；電腦忙碌時斷音就調高 |
 | `--rate 96000` | LDAC 取樣率（預設跟擷取裝置相同，通常是 48 kHz） |
 | `--device "CABLE Output"` | 指定擷取裝置（預設是預設播放裝置的 loopback） |
@@ -149,7 +155,10 @@ Windows 顯示語言是中文時，系統匣介面為繁體中文，其他語言
 
 - **`Intel firmware setup failed`**：`firmware/` 裡沒有你的控制器對應的韌體，或控制器不在 bootloader 狀態。請完整關機再開機。
 - **顯示串流中但沒聲音**：確認 Windows 的輸出裝置是 CABLE Input，且播放時 `[stats]` 那行的 `peak` 有在變動。
-- **斷音**：如果 `[stats]` 那行的 `underruns` 有增加，把 `--latency` 調高（例如 50）。否則改用 `--quality abr` 或 `--quality sq`，並讓控制器的天線遠離 USB 3 連接埠和線材。
+- **斷音，或 log 出現 `LDAC ABR: link congested`**：無線電送不完這個位元率。如果 `[stats]` 那行的 `kbps on air` 一直低於目標，問題就在連線：
+  - 很多 Intel 控制器是 Wi-Fi 和藍牙共用天線的網卡。Wi-Fi 走 **2.4 GHz** 時，兩者要輪流使用，藍牙能用的時間會少很多。請把 Wi-Fi 改連 5 GHz，或改用有線網路。
+  - 讓天線遠離 USB 3 連接埠和線材，並確認耳機是不是同時連著手機（多點連線）。
+  - 如果 `kbps on air` 正常但 `underruns` 增加，是電腦太忙，把 `--latency` 調高（例如 50）。
 - **睡眠喚醒後藍牙沒反應**：`ldac_tray.exe` 會自動重新啟動；單獨執行 `ldac_bridge.exe` 時，程式會結束，需要再手動啟動。
 - **封包記錄**：`hci_dump.pklg`（以及上一次執行的 `hci_dump.prev.pklg`）可以用 Wireshark 開啟。
 - **Windows Update 之後**原本的驅動可能被裝回去，重做第 3 步即可。

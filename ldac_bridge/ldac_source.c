@@ -44,7 +44,7 @@
 static const char * opt_name_filter;
 static const char * opt_audio_device;
 static int          opt_eqmid = LDACBT_EQMID_HQ;
-static bool         opt_abr;
+static bool         opt_abr = true;     // adaptive by default, like Android
 static uint32_t     opt_rate;          // 0 = follow capture device
 static bool         opt_sony_debug;
 static bool         opt_have_addr;
@@ -126,6 +126,9 @@ static const char * eqmid_name(int eqmid){
         case LDACBT_EQMID_HQ: return "HQ 990 kbps";
         case LDACBT_EQMID_SQ: return "SQ 660 kbps";
         case LDACBT_EQMID_MQ: return "MQ 330 kbps";
+        // intermediate steps libldac uses when adapting between SQ and MQ (ldacBT_ex.h)
+        case LDACBT_EQMID_MQ + 1: return "Q0 492 kbps";
+        case LDACBT_EQMID_MQ + 2: return "Q1 396 kbps";
         default:              return "?";
     }
 }
@@ -811,7 +814,7 @@ static void print_usage(const char * exe){
     printf("  --addr XX:XX:XX:XX:XX:XX  connect to this headset (default: last used, else scan)\n");
     printf("  --name TEXT               when scanning, pick the first device whose name contains TEXT\n");
     printf("  --scan                    ignore last used headset and scan\n");
-    printf("  --quality hq|sq|mq|abr    LDAC 990 / 660 / 330 kbps, or adaptive starting at 990 (default hq)\n");
+    printf("  --quality hq|sq|mq|abr    LDAC fixed 990 / 660 / 330 kbps, or adaptive starting at 990 (default abr)\n");
     printf("  --rate 44100|48000|96000  LDAC sampling rate (default: same as the captured device)\n");
     printf("  --device TEXT             capture this playback (loopback) or recording device (default: default playback)\n");
     printf("  --list-devices            list audio devices and exit\n");
@@ -853,9 +856,9 @@ int ldac_bridge_setup(int argc, const char * argv[]){
             if (ms <= 0){ printf("Invalid latency '%s'\n", v); return -1; }
             pcm_capture_set_latency_ms((uint32_t) ms);
         } else if (strcmp(a, "--quality") == 0 && v){
-            if      (strcmp(v, "hq") == 0)  opt_eqmid = LDACBT_EQMID_HQ;
-            else if (strcmp(v, "sq") == 0)  opt_eqmid = LDACBT_EQMID_SQ;
-            else if (strcmp(v, "mq") == 0)  opt_eqmid = LDACBT_EQMID_MQ;
+            if      (strcmp(v, "hq") == 0)  { opt_eqmid = LDACBT_EQMID_HQ; opt_abr = false; }
+            else if (strcmp(v, "sq") == 0)  { opt_eqmid = LDACBT_EQMID_SQ; opt_abr = false; }
+            else if (strcmp(v, "mq") == 0)  { opt_eqmid = LDACBT_EQMID_MQ; opt_abr = false; }
             else if (strcmp(v, "abr") == 0) { opt_eqmid = LDACBT_EQMID_HQ; opt_abr = true; }
             else { printf("Unknown quality '%s'\n", v); return -1; }
             i++;
