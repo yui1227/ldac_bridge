@@ -402,10 +402,39 @@ static void audio_stop(void){
 
 // ---- AVRCP: headset buttons -> Windows media keys ----
 
+// The headset decides from our reported status whether a tap means PLAY or PAUSE, and
+// wear detection only sends PAUSE (taken off) when it believes we are playing, and PLAY
+// (put back on) after it paused us. Windows media keys do not tell us the player state,
+// so it is derived from the audio itself: paused players output nothing.
+#define PLAYING_IF_AUDIBLE_WITHIN_MS    300
+#define PAUSED_AFTER_SILENCE_MS         2000
+#define STATUS_HOLD_AFTER_BUTTON_MS     1500    // let the player fade out / start before judging again
+
+static uint32_t avrcp_status_hold_until_ms;
+
 static void avrcp_set_status(avrcp_playback_status_t status){
     avrcp_playback_status = status;
     if (avrcp_cid){
         avrcp_target_set_playback_status(avrcp_cid, status);
+    }
+}
+
+static bool audio_is_playing(void){
+    return pcm_capture_ms_since_audible() < PLAYING_IF_AUDIBLE_WITHIN_MS;
+}
+
+static bool audio_is_silent(void){
+    return pcm_capture_ms_since_audible() > PAUSED_AFTER_SILENCE_MS;
+}
+
+static void avrcp_update_status_from_audio(void){
+    if ((int32_t)(btstack_run_loop_get_time_ms() - avrcp_status_hold_until_ms) < 0) return;
+    if (avrcp_playback_status != AVRCP_PLAYBACK_STATUS_PLAYING && audio_is_playing()){
+        printf("AVRCP: audio started, reporting playing\n");
+        avrcp_set_status(AVRCP_PLAYBACK_STATUS_PLAYING);
+    } else if (avrcp_playback_status == AVRCP_PLAYBACK_STATUS_PLAYING && audio_is_silent()){
+        printf("AVRCP: audio stopped, reporting paused\n");
+        avrcp_set_status(AVRCP_PLAYBACK_STATUS_PAUSED);
     }
 }
 
@@ -425,6 +454,8 @@ static void volume_timer_handler(btstack_timer_source_t * ts){
     if (avrcp_cid == 0) return;
     btstack_run_loop_set_timer(ts, VOLUME_POLL_MS);
     btstack_run_loop_add_timer(ts);
+
+    avrcp_update_status_from_audio();
 
     bool ok;
     uint8_t volume = windows_volume_as_avrcp(&ok);
@@ -503,13 +534,18 @@ static void avrcp_target_packet_handler(uint8_t packet_type, uint16_t channel, u
             avrcp_operation_id_t op = (avrcp_operation_id_t) avrcp_subevent_operation_get_operation_id(packet);
             printf("AVRCP: headset button %s\n", avrcp_operation2str(op));
             switch (op){
-                // Windows only has a toggle key; the headset picks PLAY or PAUSE from our reported status
+                // Windows only has a toggle key: never toggle into the opposite of what was asked
+                // (e.g. PAUSE from wear detection while nothing plays would start playback)
                 case AVRCP_OPERATION_ID_PLAY:
-                    media_key_send(MEDIA_KEY_PLAY_PAUSE);
+                    if (audio_is_playing()) printf("AVRCP: already playing, ignored\n");
+                    else media_key_send(MEDIA_KEY_PLAY_PAUSE);
+                    avrcp_status_hold_until_ms = btstack_run_loop_get_time_ms() + STATUS_HOLD_AFTER_BUTTON_MS;
                     avrcp_set_status(AVRCP_PLAYBACK_STATUS_PLAYING);
                     break;
                 case AVRCP_OPERATION_ID_PAUSE:
-                    media_key_send(MEDIA_KEY_PLAY_PAUSE);
+                    if (audio_is_silent()) printf("AVRCP: nothing playing, ignored\n");
+                    else media_key_send(MEDIA_KEY_PLAY_PAUSE);
+                    avrcp_status_hold_until_ms = btstack_run_loop_get_time_ms() + STATUS_HOLD_AFTER_BUTTON_MS;
                     avrcp_set_status(AVRCP_PLAYBACK_STATUS_PAUSED);
                     break;
                 case AVRCP_OPERATION_ID_STOP:
@@ -688,7 +724,7 @@ static void a2dp_source_packet_handler(uint8_t packet_type, uint16_t channel, ui
         case A2DP_SUBEVENT_STREAM_STARTED:
             printf("A2DP: streaming LDAC. Play something on Windows. Ctrl-C to quit.\n");
             audio_start();
-            avrcp_set_status(AVRCP_PLAYBACK_STATUS_PLAYING);
+            avrcp_set_status(audio_is_silent() ? AVRCP_PLAYBACK_STATUS_PAUSED : AVRCP_PLAYBACK_STATUS_PLAYING);
             sony_battery_connect(remote_addr);
             printf("@event connected %s %s\n", bd_addr_to_str(remote_addr), remote_name[0] ? remote_name : "headphones");
             break;

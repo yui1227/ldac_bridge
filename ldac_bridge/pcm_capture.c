@@ -29,6 +29,7 @@ static const PROPERTYKEY PKEY_FriendlyName_  = {{0xA45C254E, 0xDF1C, 0x4EFD, {0x
 #define LOOPBACK_FLAG       0x00020000  // AUDCLNT_STREAMFLAGS_LOOPBACK
 #define EVENTCALLBACK_FLAG  0x00040000  // AUDCLNT_STREAMFLAGS_EVENTCALLBACK
 #define RING_FRAMES         (192000 * 2)
+#define AUDIBLE_LEVEL       0.0001f     // -80 dBFS: anything a player outputs while playing
 #define CAPTURE_WAIT_MS     10          // poll anyway if the engine does not signal (older Windows, loopback quirks)
 
 // Jitter buffer: the buffer level is held at the target latency by running the resampler
@@ -61,6 +62,7 @@ static HANDLE           capture_ready_event;
 static bool             capture_ok;
 static IAudioEndpointVolume * endpoint_volume;   // used from the main (Bluetooth) thread only
 static float            stat_peak;
+static ULONGLONG        last_audible_tick;   // GetTickCount64() of the last captured sample above AUDIBLE_LEVEL
 
 // consumer side (Bluetooth thread)
 static uint32_t output_rate;
@@ -166,6 +168,7 @@ void pcm_capture_list_devices(void){
 }
 
 static void ring_push(const float * frames, uint32_t num_frames){
+    bool audible = false;
     EnterCriticalSection(&ring_lock);
     for (uint32_t i = 0; i < num_frames; i++){
         if (ring_count == RING_FRAMES){
@@ -181,7 +184,9 @@ static void ring_push(const float * frames, uint32_t num_frames){
         float r = fabsf(frames[2*i+1]);
         if (l > stat_peak) stat_peak = l;
         if (r > stat_peak) stat_peak = r;
+        if (l > AUDIBLE_LEVEL || r > AUDIBLE_LEVEL) audible = true;
     }
+    if (audible) last_audible_tick = GetTickCount64();
     LeaveCriticalSection(&ring_lock);
 }
 
@@ -510,6 +515,15 @@ void pcm_capture_test_init(uint32_t rate){
 
 void pcm_capture_test_push(const float * stereo_frames, uint32_t num_frames){
     ring_push(stereo_frames, num_frames);
+}
+
+uint32_t pcm_capture_ms_since_audible(void){
+    EnterCriticalSection(&ring_lock);
+    ULONGLONG last = last_audible_tick;
+    LeaveCriticalSection(&ring_lock);
+    if (last == 0) return UINT32_MAX;
+    ULONGLONG elapsed = GetTickCount64() - last;
+    return elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t) elapsed;
 }
 
 bool pcm_capture_get_volume(float * level, bool * muted){

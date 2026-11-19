@@ -13,7 +13,7 @@ Windows playback → virtual audio device (VB-CABLE) → WASAPI loopback → lib
 ## Features
 
 - LDAC at 44.1 / 48 / 88.2 / 96 kHz, 990 / 660 / 330 kbps. By default the bitrate adapts to the link, like on Android
-- Headphone buttons (play/pause, next, previous) become Windows media keys
+- Headphone buttons (play/pause, next, previous) become Windows media keys, and wear detection pauses when you take the headphones off and resumes when you put them back on
 - Two-way volume sync between Windows and the headphones (AVRCP absolute volume)
 - Left / right / case battery levels on Sony headphones
 - Tray app: starts at sign-in, shows a notification with the battery level when the headphones connect, and recovers after sleep or a lost USB connection
@@ -208,7 +208,7 @@ When updating BTstack in `setup.sh`, check whether these are fixed upstream.
 
 - Clock drift between the audio device and Bluetooth is compensated by resampling up to ±0.2 % faster or slower (shown as `drift` in the `[stats]` line), which is inaudible.
 - Only Classic Bluetooth is used. LE Audio is not.
-- Windows only has a play/pause toggle, so if the headphones and the player get out of sync, press the button once more.
+- Windows only has a play/pause toggle and does not report whether a player is playing. ldac_bridge tells the headphones "playing" while sound is captured and "paused" after 2 seconds of silence, and ignores a pause while nothing plays (or a play while something plays), so the toggle never goes the wrong way. A player that keeps outputting sound while paused, or a long silent passage, can still confuse it.
 
 ## License
 

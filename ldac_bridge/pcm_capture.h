@@ -45,6 +45,10 @@ void pcm_capture_get_stats(uint32_t * underruns, uint32_t * overruns, uint32_t *
 void pcm_capture_test_init(uint32_t device_rate);
 void pcm_capture_test_push(const float * stereo_frames, uint32_t num_frames);
 
+// Milliseconds since the last captured sample above -80 dBFS (UINT32_MAX if never).
+// Paused players output nothing, so this tells whether something is playing.
+uint32_t pcm_capture_ms_since_audible(void);
+
 // Windows volume of the playback endpoint (the loopback device, or the default
 // playback device when capturing a recording device). level: 0.0 .. 1.0
 bool pcm_capture_get_volume(float * level, bool * muted);
