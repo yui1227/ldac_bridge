@@ -115,7 +115,7 @@ Press Ctrl-C to stop.
 - When the headphones connect, a notification shows their name and battery levels.
 - The tray icon's tooltip shows the connection state and battery levels. Click the icon to open the log, restart Bluetooth, or exit.
 - It restarts ldac_bridge after a crash, after sleep, or when the adapter stops responding.
-- All output goes to `ldac_bridge.log` next to the executables.
+- All output goes to `ldac_bridge.log` next to the executables. At 2 MB it is renamed to `ldac_bridge.old.log` and a new file is started, so the logs never take more than about 4 MB.
 
 To start it when you sign in to Windows (current user only, no administrator rights needed):
 

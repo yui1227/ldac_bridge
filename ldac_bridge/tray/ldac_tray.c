@@ -8,7 +8,8 @@
 //   and --install stores them for autostart
 //
 // ldac_bridge.exe reports state as "@event ..." lines on stdout; everything is also
-// written to ldac_bridge.log next to the executables.
+// written to ldac_bridge.log next to the executables (rotated at 2 MB, one
+// previous file kept as ldac_bridge.old.log).
 
 #define WIN32_LEAN_AND_MEAN
 #ifndef UNICODE
@@ -44,7 +45,7 @@
 #define RESTART_MAX_DELAY_MS        60000
 #define STABLE_RUN_MS               60000
 #define KILL_TIMEOUT_MS             3000
-#define LOG_MAX_BYTES               (5 * 1024 * 1024)
+#define LOG_MAX_BYTES               (2 * 1024 * 1024)   // then renamed to ldac_bridge.old.log
 
 #define MENU_STATUS         1
 #define MENU_OPEN_LOG       2
@@ -92,6 +93,7 @@ static void select_language(void){
 static wchar_t exe_dir[MAX_PATH];
 static wchar_t bridge_path[MAX_PATH];
 static wchar_t log_path[MAX_PATH];
+static wchar_t old_log_path[MAX_PATH];
 static wchar_t bridge_args[512];   // our command line minus --install/--uninstall, passed to ldac_bridge.exe
 
 static HWND            hwnd;
@@ -104,6 +106,8 @@ static DWORD   child_start_tick;
 static DWORD   restart_delay = RESTART_MIN_DELAY_MS;
 static bool    exiting;
 static HANDLE  log_file = INVALID_HANDLE_VALUE;
+static LONGLONG log_size;
+static CRITICAL_SECTION log_lock;   // main thread opens, reader threads write
 
 // state shown in tooltip and notifications
 static wchar_t status_text[64];
@@ -202,14 +206,49 @@ static void handle_bridge_event(const char * line){
 
 // ---- child process ----
 
-static void open_log(void){
+// caller holds log_lock
+static void open_log_locked(void){
     if (log_file != INVALID_HANDLE_VALUE) CloseHandle(log_file);
-    log_file = CreateFileW(log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    log_file = CreateFileW(log_path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     LARGE_INTEGER size;
-    if (log_file != INVALID_HANDLE_VALUE && GetFileSizeEx(log_file, &size) && size.QuadPart > LOG_MAX_BYTES){
-        CloseHandle(log_file);
-        log_file = CreateFileW(log_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    log_size = (log_file != INVALID_HANDLE_VALUE && GetFileSizeEx(log_file, &size)) ? size.QuadPart : 0;
+}
+
+// keep the current file and one previous: ldac_bridge.log -> ldac_bridge.old.log
+static void rotate_log_locked(void){
+    if (log_file != INVALID_HANDLE_VALUE) CloseHandle(log_file);
+    log_file = INVALID_HANDLE_VALUE;
+    if (!MoveFileExW(log_path, old_log_path, MOVEFILE_REPLACE_EXISTING)){
+        // e.g. the old file is open somewhere without delete sharing: start over instead
+        HANDLE h = CreateFileW(log_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
+    open_log_locked();
+}
+
+static void open_log(void){
+    EnterCriticalSection(&log_lock);
+    open_log_locked();
+    if (log_size > LOG_MAX_BYTES) rotate_log_locked();
+    LeaveCriticalSection(&log_lock);
+}
+
+static void write_log(const char * data, DWORD n){
+    EnterCriticalSection(&log_lock);
+    DWORD written = 0;
+    if (log_file != INVALID_HANDLE_VALUE && log_size + n > LOG_MAX_BYTES){
+        // finish the current line in the old file so no line is split across both
+        const char * newline = memchr(data, '\n', n);
+        if (newline){
+            DWORD head = (DWORD)(newline - data) + 1;
+            WriteFile(log_file, data, head, &written, NULL);
+            data += head;
+            n -= head;
+            rotate_log_locked();
+        }
+    }
+    if (n && log_file != INVALID_HANDLE_VALUE && WriteFile(log_file, data, n, &written, NULL)) log_size += written;
+    LeaveCriticalSection(&log_lock);
 }
 
 // reads ldac_bridge stdout: copy to log, forward "@event" lines to the window
@@ -220,8 +259,7 @@ static DWORD WINAPI reader_thread(LPVOID arg){
     size_t line_len = 0;
     DWORD n;
     while (ReadFile(pipe, buffer, sizeof(buffer), &n, NULL) && n > 0){
-        DWORD written;
-        if (log_file != INVALID_HANDLE_VALUE) WriteFile(log_file, buffer, n, &written, NULL);
+        write_log(buffer, n);
         for (DWORD i = 0; i < n; i++){
             char ch = buffer[i];
             if (ch == '\r') continue;
@@ -484,6 +522,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev, PWSTR cmd, int show){
     if (sep) *sep = 0;
     swprintf(bridge_path, MAX_PATH, L"%ls\\ldac_bridge.exe", exe_dir);
     swprintf(log_path, MAX_PATH, L"%ls\\ldac_bridge.log", exe_dir);
+    swprintf(old_log_path, MAX_PATH, L"%ls\\ldac_bridge.old.log", exe_dir);
+    InitializeCriticalSection(&log_lock);
 
     quit_event = CreateEventW(NULL, TRUE, FALSE, QUIT_EVENT_NAME);
 
